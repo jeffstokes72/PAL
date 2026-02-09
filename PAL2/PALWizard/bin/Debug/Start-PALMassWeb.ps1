@@ -18,8 +18,19 @@ if (-not $IsWindows) {
     throw "Start-PALMassWeb.ps1 is intended for Windows (BLG + PAL dependencies). Use Invoke-PALMass.ps1 for headless runs if applicable."
 }
 
-$PalScriptPath = Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot $PSScriptRoot
-$palRoot = Split-Path -Parent $PalScriptPath
+$script:WebRoot = $PSScriptRoot
+$script:PalScriptPathResolved = $null
+$script:PalRoot = $null
+$script:InitError = $null
+
+try {
+    $script:PalScriptPathResolved = Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot $script:WebRoot
+    $script:PalRoot = Split-Path -Parent $script:PalScriptPathResolved
+} catch {
+    $script:InitError = $_.Exception.ToString()
+    # Keep web UI running so operator can see the error.
+    Write-PalMassWebServerLog "INIT ERROR: $script:InitError"
+}
 
 if ([string]::IsNullOrWhiteSpace($DefaultInputPath)) {
     if ($IsWindows) { $DefaultInputPath = "C:\\" } else { $DefaultInputPath = (Get-Location).Path }
@@ -29,6 +40,9 @@ if ([string]::IsNullOrWhiteSpace($DefaultOutputRoot)) {
 }
 
 function Get-AvailableThresholdXmls([string] $root) {
+    if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) {
+        return @()
+    }
     $exclude = @(
         "All.xml","AutoDetect.xml","CalculatedIops.xml","Custom.xml","ICIPThresholds.xml",
         "PALFunctions.xml","PALWizard.xml","CounterLang.xml","PAL_VMwareView_PCoIP.xml","PAL_VMwareView_VDM.xml"
@@ -39,10 +53,10 @@ function Get-AvailableThresholdXmls([string] $root) {
         Select-Object -ExpandProperty Name
 }
 
-$availableXmls = @(Get-AvailableThresholdXmls -root $palRoot)
-$defaultThresholds = @("QuickSystemOverview.xml","SystemOverview.xml","VMWare.xml") | Where-Object { $availableXmls -contains $_ }
-if ($defaultThresholds.Count -eq 0 -and $availableXmls.Count -gt 0) {
-    $defaultThresholds = @($availableXmls | Select-Object -First 3)
+$script:availableXmls = @(Get-AvailableThresholdXmls -root $script:PalRoot)
+$script:defaultThresholds = @("QuickSystemOverview.xml","SystemOverview.xml","VMWare.xml") | Where-Object { $script:availableXmls -contains $_ }
+if ($script:defaultThresholds.Count -eq 0 -and $script:availableXmls.Count -gt 0) {
+    $script:defaultThresholds = @($script:availableXmls | Select-Object -First 3)
 }
 
 $global:PALMassWebJob = $null
@@ -393,16 +407,17 @@ try {
             if ($path -eq "/api/config") {
                 try {
                     $obj = [ordered]@{
-                        palRoot = $palRoot
-                        palScriptPath = $PalScriptPath
-                        availableThresholdXmls = $availableXmls
-                        defaultThresholdXmls = $defaultThresholds
+                        palRoot = $script:PalRoot
+                        palScriptPath = $script:PalScriptPathResolved
+                        availableThresholdXmls = $script:availableXmls
+                        defaultThresholdXmls = $script:defaultThresholds
                         defaultInputPath = $DefaultInputPath
                         defaultOutputRoot = $DefaultOutputRoot
                         defaultThrottleLimit = $DefaultThrottleLimit
                         defaultPalThreads = $DefaultPalThreads
                         defaultAnalysisInterval = $DefaultAnalysisInterval
                         serverLog = $script:PALMassWebServerLog
+                        initError = $script:InitError
                     }
                     Send-Json -ctx $ctx -obj $obj
                 } catch {
@@ -442,6 +457,11 @@ try {
                 }
                 $body = Read-BodyJson -ctx $ctx
                 if (-not $body) { Send-ApiErrorJson -ctx $ctx -message "Missing JSON body." -statusCode 400; continue }
+
+                if ([string]::IsNullOrWhiteSpace($script:PalScriptPathResolved) -or -not (Test-Path -LiteralPath $script:PalScriptPathResolved)) {
+                    Send-ApiErrorJson -ctx $ctx -message ("PAL.ps1 could not be resolved. " + $script:InitError) -statusCode 500
+                    continue
+                }
 
                 $out = [string]$body.outputRoot
                 if ([string]::IsNullOrWhiteSpace($out)) { $out = $DefaultOutputRoot }
@@ -499,7 +519,7 @@ try {
                             Write-JsonFile -Path $statusPath -Object $st
                         } catch { }
                     }
-                } -ArgumentList @($PSScriptRoot, $inputPaths, $global:PALMassWebOutputRoot, $PalScriptPath, $thresholds, $thr, $pt, $ai, $global:PALMassWebStatusPath)
+                } -ArgumentList @($PSScriptRoot, $inputPaths, $global:PALMassWebOutputRoot, $script:PalScriptPathResolved, $thresholds, $thr, $pt, $ai, $global:PALMassWebStatusPath)
 
                 $resp = [ordered]@{
                     started = $true
