@@ -88,7 +88,7 @@ function Get-SafeLocalPathFromUrl([string] $basePath, [string] $urlPath) {
     return $full
 }
 
-$html = @"
+$script:html = @'
 <!doctype html>
 <html>
 <head>
@@ -325,7 +325,7 @@ fetchConfig().catch(e => { document.getElementById('status').textContent = Strin
 </script>
 </body>
 </html>
-"@
+'@
 
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$Port/")
@@ -349,7 +349,7 @@ try {
         $path = $ctx.Request.Url.AbsolutePath
         try {
             if ($path -eq "/") {
-                Send-Text -ctx $ctx -text $html -contentType "text/html; charset=utf-8"
+                Send-Text -ctx $ctx -text $script:html -contentType "text/html; charset=utf-8"
                 continue
             }
 
