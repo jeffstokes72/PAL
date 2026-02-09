@@ -407,6 +407,21 @@ try {
 
                 $global:PALMassWebOutputRoot = (Resolve-Path -LiteralPath $out).Path
                 $global:PALMassWebStatusPath = Join-Path -Path $global:PALMassWebOutputRoot -ChildPath "status.json"
+                $global:PALMassWebLogPath = Join-Path -Path $global:PALMassWebOutputRoot -ChildPath "palmass.log"
+
+                # Write initial status so /api/status can show useful info immediately.
+                try {
+                    $init = [ordered]@{
+                        startedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                        completedUtc = $null
+                        state = "Starting"
+                        outputRoot = $global:PALMassWebOutputRoot
+                        statusPath = $global:PALMassWebStatusPath
+                        logPath = $global:PALMassWebLogPath
+                        lastUpdateUtc = (Get-Date).ToUniversalTime().ToString("o")
+                    }
+                    Write-JsonFile -Path $global:PALMassWebStatusPath -Object $init
+                } catch { }
 
                 $inputPaths = @([string[]]$body.inputPaths)
                 $thresholds = @([string[]]$body.thresholdFiles)
@@ -421,7 +436,27 @@ try {
                     param($psRoot, $inputPaths, $outputRoot, $palScriptPath, $thresholds, $thr, $pt, $ai, $statusPath)
                     Set-StrictMode -Version 2
                     . (Join-Path -Path $psRoot -ChildPath "PALMass.ps1")
-                    Invoke-PalMass -InputPaths $inputPaths -OutputRoot $outputRoot -PalScriptPath $palScriptPath -ThresholdFiles $thresholds -ThrottleLimit $thr -PalThreads $pt -AnalysisInterval $ai -StatusPath $statusPath | Out-Null
+                    try {
+                        Invoke-PalMass -InputPaths $inputPaths -OutputRoot $outputRoot -PalScriptPath $palScriptPath -ThresholdFiles $thresholds -ThrottleLimit $thr -PalThreads $pt -AnalysisInterval $ai -StatusPath $statusPath | Out-Null
+                    } catch {
+                        $err = $_.Exception.ToString()
+                        try {
+                            Initialize-PalMassLogging -OutputRoot $outputRoot
+                            Write-PalMassLog -Level ERROR -Message $err
+                            $idx = Write-PalMassFailureIndexHtml -OutputRoot $outputRoot -ErrorText $err -LogPath $script:PalMassLogPath
+                            $st = [ordered]@{
+                                startedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                                completedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                                state = "Failed"
+                                outputRoot = $outputRoot
+                                error = $err
+                                masterReport = $idx
+                                logPath = $script:PalMassLogPath
+                                lastUpdateUtc = (Get-Date).ToUniversalTime().ToString("o")
+                            }
+                            Write-JsonFile -Path $statusPath -Object $st
+                        } catch { }
+                    }
                 } -ArgumentList @($PSScriptRoot, $inputPaths, $global:PALMassWebOutputRoot, $PalScriptPath, $thresholds, $thr, $pt, $ai, $global:PALMassWebStatusPath)
 
                 $resp = [ordered]@{
@@ -439,6 +474,8 @@ try {
                     try {
                         $st = Get-Content -LiteralPath $global:PALMassWebStatusPath -Raw | ConvertFrom-Json
                         $st | Add-Member -NotePropertyName "masterUrl" -NotePropertyValue "/out/index.html" -Force
+                        $st | Add-Member -NotePropertyName "logUrl" -NotePropertyValue "/out/palmass.log" -Force
+                        $st | Add-Member -NotePropertyName "jobState" -NotePropertyValue $(if ($global:PALMassWebJob) { $global:PALMassWebJob.State } else { "Idle" }) -Force
                         Send-Json -ctx $ctx -obj $st
                     } catch {
                         Send-Json -ctx $ctx -obj @{ error = $_.Exception.Message } -statusCode 500

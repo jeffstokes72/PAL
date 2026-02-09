@@ -61,7 +61,7 @@ Defaults (minimum set used if you don’t pick others):
 Web launcher (directory-tree picker):
 
 ```powershell
-pwsh .\PAL2\PAlWizard\bin\Debug\Start-PALMassWeb.ps1
+pwsh .\PAL2\PALWizard\bin\Debug\Start-PALMassWeb.ps1
 ```
 
 Headless batch (parallel):

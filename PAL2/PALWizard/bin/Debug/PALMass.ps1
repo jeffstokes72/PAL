@@ -1,5 +1,64 @@
 Set-StrictMode -Version 2
 
+# NOTE: Do not rely on $PSScriptRoot at runtime after dot-sourcing.
+# $script:PalMassRoot is set when this file is dot-sourced / executed.
+$script:PalMassRoot = $null
+try {
+    if ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path) {
+        $script:PalMassRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+} catch { }
+
+$script:PalMassLogPath = $null
+
+function Initialize-PalMassLogging {
+    param(
+        [Parameter(Mandatory=$true)][string] $OutputRoot,
+        [Parameter()][string] $LogPath
+    )
+    try {
+        if ([string]::IsNullOrWhiteSpace($LogPath)) {
+            $LogPath = Join-Path -Path $OutputRoot -ChildPath "palmass.log"
+        }
+        $dir = Split-Path -Parent $LogPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            [IO.File]::WriteAllText($LogPath, "", [Text.Encoding]::UTF8)
+        }
+        $script:PalMassLogPath = $LogPath
+        Write-PalMassLog -Level INFO -Message "Logging initialized: $LogPath"
+    } catch {
+        # Best-effort: if logging can't initialize, continue without file logging.
+        $script:PalMassLogPath = $null
+    }
+}
+
+function Write-PalMassLog {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('DEBUG','INFO','WARN','ERROR')][string] $Level,
+        [Parameter(Mandatory=$true)][string] $Message,
+        [Parameter()][string] $RunId
+    )
+    $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss.fff")
+    $rid = if ([string]::IsNullOrWhiteSpace($RunId)) { "" } else { " [$RunId]" }
+    $line = "[$ts] [$Level]$rid $Message"
+
+    try {
+        switch ($Level) {
+            'ERROR' { Write-Host $line -ForegroundColor Red }
+            'WARN'  { Write-Host $line -ForegroundColor Yellow }
+            'DEBUG' { Write-Host $line -ForegroundColor DarkGray }
+            default { Write-Host $line }
+        }
+    } catch { }
+
+    if (-not [string]::IsNullOrWhiteSpace($script:PalMassLogPath)) {
+        try {
+            [IO.File]::AppendAllText($script:PalMassLogPath, $line + [Environment]::NewLine, [Text.Encoding]::UTF8)
+        } catch { }
+    }
+}
+
 function Test-Ps7OrHigher {
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         throw "PowerShell 7+ is required. Current: $($PSVersionTable.PSVersion). Install from https://github.com/PowerShell/PowerShell and re-run using pwsh."
@@ -32,7 +91,9 @@ function Get-DefaultPalThresholdFiles {
 
 function Get-PalRootFromThisScript {
     # Scripts are intended to live next to PAL.ps1 (FlatFile layout).
-    return $PSScriptRoot
+    if (-not [string]::IsNullOrWhiteSpace($script:PalMassRoot)) { return $script:PalMassRoot }
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { return $PSScriptRoot }
+    throw "Unable to determine PALMass root folder. Re-dot-source PALMass.ps1 from disk."
 }
 
 function Resolve-PalScriptPath {
@@ -104,12 +165,15 @@ function Write-JsonFile {
         [Parameter(Mandatory=$true)][string] $Path,
         [Parameter(Mandatory=$true)] $Object
     )
-    $json = $Object | ConvertTo-Json -Depth 8
+    $json = $Object | ConvertTo-Json -Depth 10
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    [IO.File]::WriteAllText($Path, $json, [Text.Encoding]::UTF8)
+    # Atomic write (best-effort) to reduce partial/corrupt status files.
+    $tmp = "$Path.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+    [IO.File]::WriteAllText($tmp, $json, [Text.Encoding]::UTF8)
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
 function Get-PalAlertCountsFromReportXml {
@@ -159,20 +223,26 @@ function Invoke-PalSingleRun {
     $xmlName  = "report.xml"
 
     # Note: invoke PAL within this runspace. (Safe when called from separate runspaces/processes.)
-    & $PalScriptPath `
-        -Log $LogPath `
-        -ThresholdFile $ThresholdFilePath `
-        -AnalysisInterval $AnalysisInterval `
-        -IsOutputHtml $true `
-        -IsOutputXml $true `
-        -HtmlOutputFileName $htmlName `
-        -XmlOutputFileName $xmlName `
-        -OutputDir $OutputDir `
-        -AllCounterStats $true `
-        -NumberOfThreads $PalThreads `
-        -IsLowPriority $false `
-        -DisplayReport $false `
-        -ClearLog $false | Out-Null
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Stop'
+    try {
+        & $PalScriptPath `
+            -Log $LogPath `
+            -ThresholdFile $ThresholdFilePath `
+            -AnalysisInterval $AnalysisInterval `
+            -IsOutputHtml $true `
+            -IsOutputXml $true `
+            -HtmlOutputFileName $htmlName `
+            -XmlOutputFileName $xmlName `
+            -OutputDir $OutputDir `
+            -AllCounterStats $true `
+            -NumberOfThreads $PalThreads `
+            -IsLowPriority $false `
+            -DisplayReport $false `
+            -ClearLog $false | Out-Null
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
 
     $htmlPath = Join-Path -Path $OutputDir -ChildPath $htmlName
     $xmlPath  = Join-Path -Path $OutputDir -ChildPath $xmlName
@@ -213,6 +283,9 @@ code { background:#f7f7f7; padding: 1px 4px; border-radius: 4px; }
 "@
 
     $rows = New-Object System.Text.StringBuilder
+    if (-not $Results -or $Results.Count -eq 0) {
+        [void]$rows.AppendLine("<tr><td colspan='4'><b>No reports were generated.</b> Check <code>palmass.log</code> for errors.</td></tr>")
+    }
     foreach ($r in $sorted) {
         $isWorst = $topSet.ContainsKey($r.RunId)
         $rowClass = $(if ($isWorst) { "worst" } else { "" })
@@ -270,6 +343,44 @@ code { background:#f7f7f7; padding: 1px 4px; border-radius: 4px; }
     return $indexPath
 }
 
+function Write-PalMassFailureIndexHtml {
+    param(
+        [Parameter(Mandatory=$true)][string] $OutputRoot,
+        [Parameter(Mandatory=$true)][string] $ErrorText,
+        [Parameter()][string] $LogPath
+    )
+    try { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null } catch { }
+    $indexPath = Join-Path -Path $OutputRoot -ChildPath "index.html"
+    $now = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $err = [System.Net.WebUtility]::HtmlEncode($ErrorText)
+    $log = if ([string]::IsNullOrWhiteSpace($LogPath)) { "" } else { [System.Net.WebUtility]::HtmlEncode($LogPath) }
+    $html = @"
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PAL Mass Processing - Failed</title>
+  <style>
+    body { font: 14px/20px Segoe UI, Arial, sans-serif; margin: 18px; color: #111; }
+    .box { border: 1px solid #ddd; padding: 12px; border-radius: 8px; background: #fff5f5; }
+    code, pre { background:#f7f7f7; padding: 8px; border-radius: 6px; display:block; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>PAL Mass Processing - Failed</h1>
+  <div>Generated: <b>$now</b></div>
+  <div class="box">
+    <div><b>Error</b></div>
+    <pre>$err</pre>
+    $(if ($log) { "<div><b>Log:</b> <code>$log</code></div>" } else { "" })
+  </div>
+</body>
+</html>
+"@
+    try { [IO.File]::WriteAllText($indexPath, $html, [Text.Encoding]::UTF8) } catch { }
+    return $indexPath
+}
+
 function Invoke-PalMass {
     param(
         [Parameter(Mandatory=$true)][string[]] $InputPaths,
@@ -284,34 +395,56 @@ function Invoke-PalMass {
 
     Test-Ps7OrHigher
 
-    $palMassLibPath = Join-Path -Path $PSScriptRoot -ChildPath "PALMass.ps1"
-    $palRoot = Split-Path -Parent (Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot $PSScriptRoot)
-    $PalScriptPath = Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot $palRoot
+    $indexPath = $null
+    $csvPath = $null
+    $jsonPath = $null
 
-    if (-not $ThresholdFiles -or $ThresholdFiles.Count -eq 0) {
-        $ThresholdFiles = Get-DefaultPalThresholdFiles -PalRoot $palRoot
-    } else {
-        $ThresholdFiles = Resolve-ThresholdFilePaths -ThresholdFiles $ThresholdFiles -PalRoot $palRoot
-    }
+    try {
+        if ([string]::IsNullOrWhiteSpace($OutputRoot)) { throw "OutputRoot cannot be empty." }
+        New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
+        Initialize-PalMassLogging -OutputRoot $OutputRoot
 
-    $inputRoots = @()
-    foreach ($p in $InputPaths) {
-        if ([string]::IsNullOrWhiteSpace($p)) { continue }
-        if (-not (Test-Path -LiteralPath $p)) { throw "Input path not found: $p" }
-        $inputRoots += (Resolve-Path -LiteralPath $p).Path
-    }
-    if ($inputRoots.Count -eq 0) { throw "No valid -InputPaths provided." }
+        $palMassLibPath = Join-Path -Path (Get-PalRootFromThisScript) -ChildPath "PALMass.ps1"
+        $palRoot = Split-Path -Parent (Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot (Get-PalRootFromThisScript))
+        $PalScriptPath = Resolve-PalScriptPath -PalScriptPath $PalScriptPath -PalRoot $palRoot
+        Write-PalMassLog -Level INFO -Message "PAL.ps1: $PalScriptPath"
 
-    New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
+        if (-not $ThresholdFiles -or $ThresholdFiles.Count -eq 0) {
+            $ThresholdFiles = Get-DefaultPalThresholdFiles -PalRoot $palRoot
+        } else {
+            $ThresholdFiles = Resolve-ThresholdFilePaths -ThresholdFiles $ThresholdFiles -PalRoot $palRoot
+        }
+        Write-PalMassLog -Level INFO -Message ("Threshold XMLs: " + (($ThresholdFiles | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object) -join ", "))
 
-    # Gather BLG files from selected roots.
-    $blg = New-Object System.Collections.Generic.List[string]
-    foreach ($root in $inputRoots) {
-        Get-ChildItem -LiteralPath $root -Recurse -File -Filter "*.blg" -ErrorAction SilentlyContinue |
-            ForEach-Object { $blg.Add($_.FullName) }
-    }
-    $blg = $blg | Sort-Object -Unique
-    if ($blg.Count -eq 0) { throw "No .blg files found under: $($inputRoots -join ', ')" }
+        $inputRoots = @()
+        foreach ($p in $InputPaths) {
+            if ([string]::IsNullOrWhiteSpace($p)) { continue }
+            if (-not (Test-Path -LiteralPath $p)) { throw "Input path not found: $p" }
+            $inputRoots += (Resolve-Path -LiteralPath $p).Path
+        }
+        if ($inputRoots.Count -eq 0) { throw "No valid -InputPaths provided." }
+
+        Write-PalMassLog -Level INFO -Message ("Input roots: " + ($inputRoots -join "; "))
+
+        # Gather BLG files from selected roots.
+        $blg = New-Object System.Collections.Generic.List[string]
+        foreach ($root in $inputRoots) {
+            Get-ChildItem -LiteralPath $root -Recurse -File -Filter "*.blg" -ErrorAction SilentlyContinue |
+                ForEach-Object { $blg.Add($_.FullName) }
+        }
+        $blg = $blg | Sort-Object -Unique
+        if ($blg.Count -eq 0) {
+            Write-PalMassLog -Level ERROR -Message ("No .blg files found under: " + ($inputRoots -join ", "))
+            $indexPath = Write-PalMasterHtmlReport -OutputRoot $OutputRoot -Results @()
+            return [pscustomobject]@{
+                OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
+                MasterReport = $indexPath
+                ResultsCsv = $null
+                ResultsJson = $null
+                Runs = @()
+            }
+        }
+        Write-PalMassLog -Level INFO -Message ("Found $($blg.Count) .blg files.")
 
     $status = [ordered]@{
         startedUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -328,10 +461,12 @@ function Invoke-PalMass {
     if ($StatusPath) { Write-JsonFile -Path $StatusPath -Object $status }
 
     # Process each BLG in parallel; within each BLG, run all selected threshold XMLs.
+    $mainLogPath = $script:PalMassLogPath
     $results = $blg | ForEach-Object -Parallel {
         param($blgPath)
 
         . $using:palMassLibPath
+        $script:PalMassLogPath = $using:mainLogPath
 
         $palScript = $using:PalScriptPath
         $thresholds = $using:ThresholdFiles
@@ -382,10 +517,12 @@ function Invoke-PalMass {
             $ok = $true
             $errorText = $null
             try {
+                Write-PalMassLog -Level INFO -Message "Processing: $blgPath with $thresholdName => $outDir" -RunId $runId
                 $runOut = Invoke-PalSingleRun -PalScriptPath $palScript -LogPath $blgPath -ThresholdFilePath $t -OutputDir $outDir -PalThreads $palThreads -AnalysisInterval $analysisInterval
             } catch {
                 $ok = $false
-                $errorText = $_.Exception.Message
+                $errorText = $_.Exception.ToString()
+                Write-PalMassLog -Level ERROR -Message ("PAL run failed: " + $errorText) -RunId $runId
                 $runOut = [pscustomobject]@{ HtmlPath = (Join-Path $outDir "report.htm"); XmlPath = (Join-Path $outDir "report.xml") }
             }
 
@@ -433,9 +570,9 @@ function Invoke-PalMass {
         if ($x -is [System.Collections.IEnumerable]) { $flat += @($x) } else { $flat += $x }
     }
 
-    $indexPath = Write-PalMasterHtmlReport -OutputRoot $OutputRoot -Results $flat
-    $csvPath = Join-Path -Path $OutputRoot -ChildPath "results.csv"
-    $jsonPath = Join-Path -Path $OutputRoot -ChildPath "results.json"
+        $indexPath = Write-PalMasterHtmlReport -OutputRoot $OutputRoot -Results $flat
+        $csvPath = Join-Path -Path $OutputRoot -ChildPath "results.csv"
+        $jsonPath = Join-Path -Path $OutputRoot -ChildPath "results.json"
 
     $flat | Select-Object RelativeBlgPath, ThresholdName, Criticals, Warnings, Score, Succeeded, ReportHtmlPath, ReportXmlPath, Error |
         Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
@@ -451,12 +588,39 @@ function Invoke-PalMass {
         } catch { }
     }
 
-    return [pscustomobject]@{
-        OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
-        MasterReport = $indexPath
-        ResultsCsv = $csvPath
-        ResultsJson = $jsonPath
-        Runs = $flat
+        Write-PalMassLog -Level INFO -Message "Master report: $indexPath"
+        return [pscustomobject]@{
+            OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
+            MasterReport = $indexPath
+            ResultsCsv = $csvPath
+            ResultsJson = $jsonPath
+            Runs = $flat
+        }
+    } catch {
+        $err = $_.Exception.ToString()
+        try { Initialize-PalMassLogging -OutputRoot $OutputRoot } catch { }
+        Write-PalMassLog -Level ERROR -Message $err
+        $indexPath = Write-PalMassFailureIndexHtml -OutputRoot $OutputRoot -ErrorText $err -LogPath $script:PalMassLogPath
+        if ($StatusPath) {
+            try {
+                $st = [ordered]@{
+                    startedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                    completedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                    outputRoot = $OutputRoot
+                    error = $err
+                    masterReport = $indexPath
+                    log = $script:PalMassLogPath
+                }
+                Write-JsonFile -Path $StatusPath -Object $st
+            } catch { }
+        }
+        return [pscustomobject]@{
+            OutputRoot = $OutputRoot
+            MasterReport = $indexPath
+            ResultsCsv = $null
+            ResultsJson = $null
+            Runs = @()
+        }
     }
 }
 
