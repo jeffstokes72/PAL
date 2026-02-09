@@ -55,6 +55,29 @@ PAL threshold files might need more arguments passed into the script for proper 
 *Process all counters in the log Example:*
 .\PAL.ps1 -Log SamplePerfmonLog.blg -ThresholdFile QuickSystemOverview.xml -NumberOfProcessors 1 -TotalMemory 1 -SixtyFourBit $False -AllCounterStats $True
 
+!! Mass processing (PowerShell 7+)
+
+This distribution also includes a simple mass-processing launcher for analyzing an entire directory tree of .blg files and producing:
+- A mirrored output directory tree
+- A per-BLG PAL report per selected threshold XML
+- A master HTML report (index.html) linking to all reports and highlighting the worst first
+
+Scripts (run from this folder):
+
+*Web launcher (directory tree picker):*
+pwsh .\Start-PALMassWeb.ps1
+
+*Headless batch (parallel):*
+pwsh .\Invoke-PALMass.ps1 -InputPaths "C:\PerfLogs" -OutputRoot "C:\PAL_Mass_Output" -ThrottleLimit 4 -PalThreads 4
+
+Defaults:
+- Threshold XMLs: QuickSystemOverview.xml, SystemOverview.xml, VMWare.xml (at minimum)
+- AllCounterStats: True
+
+Output:
+- index.html (master report)
+- results.csv / results.json (summary)
+
 !! Installation
 
 Run the PAL setup MSI file that ships in the zip file at http://pal.codeplex.com.
