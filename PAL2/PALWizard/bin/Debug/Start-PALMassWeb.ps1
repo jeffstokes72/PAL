@@ -48,6 +48,15 @@ if ($defaultThresholds.Count -eq 0 -and $availableXmls.Count -gt 0) {
 $global:PALMassWebJob = $null
 $global:PALMassWebOutputRoot = $null
 $global:PALMassWebStatusPath = $null
+$script:PALMassWebServerLog = Join-Path -Path $env:TEMP -ChildPath ("palmass-web-" + (Get-Date).ToString("yyyyMMdd") + ".log")
+
+function Write-PalMassWebServerLog {
+    param([Parameter(Mandatory=$true)][string] $Message)
+    try {
+        $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss.fff")
+        [IO.File]::AppendAllText($script:PALMassWebServerLog, "[$ts] $Message$([Environment]::NewLine)", [Text.Encoding]::UTF8)
+    } catch { }
+}
 
 function Send-Json($ctx, $obj, [int] $statusCode = 200) {
     $ctx.Response.StatusCode = $statusCode
@@ -65,6 +74,14 @@ function Send-Text($ctx, [string] $text, [string] $contentType = "text/plain; ch
     $ctx.Response.ContentLength64 = $bytes.Length
     $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $ctx.Response.OutputStream.Close()
+}
+
+function Send-ApiErrorJson($ctx, [string] $message, [int] $statusCode = 500) {
+    $obj = [ordered]@{
+        error = $message
+        serverLog = $script:PALMassWebServerLog
+    }
+    Send-Json -ctx $ctx -obj $obj -statusCode $statusCode
 }
 
 function Read-BodyJson($ctx) {
@@ -160,9 +177,28 @@ $script:html = @'
 let config = null;
 let selectedDirs = new Set();
 
+async function readJsonOrThrow(resp) {
+  const ct = resp.headers.get('content-type') || '';
+  const text = await resp.text();
+  if (!resp.ok) {
+    // Try to parse structured error if possible.
+    try {
+      const j = JSON.parse(text);
+      throw new Error(j.error || ('HTTP ' + resp.status));
+    } catch (e) {
+      throw new Error(text || ('HTTP ' + resp.status));
+    }
+  }
+  if (ct.includes('application/json')) {
+    return JSON.parse(text);
+  }
+  // Not JSON; surface raw server output.
+  throw new Error(text || 'Expected JSON but got empty response.');
+}
+
 async function fetchConfig() {
   const r = await fetch('/api/config');
-  config = await r.json();
+  config = await readJsonOrThrow(r);
   document.getElementById('rootPath').value = config.defaultInputPath;
   document.getElementById('outputRoot').value = config.defaultOutputRoot;
   document.getElementById('throttle').value = config.defaultThrottleLimit;
@@ -195,7 +231,7 @@ async function loadTree() {
   const treeDiv = document.getElementById('tree');
   treeDiv.textContent = 'Loading...';
   const r = await fetch('/api/tree?path=' + encodeURIComponent(root));
-  const data = await r.json();
+  const data = await readJsonOrThrow(r);
   treeDiv.innerHTML = renderTree(data);
 }
 
@@ -304,14 +340,14 @@ async function startRun() {
     analysisInterval: document.getElementById('interval').value || 'AUTO'
   };
   const r = await fetch('/api/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-  const resp = await r.json();
+  const resp = await readJsonOrThrow(r);
   document.getElementById('links').innerHTML = resp.masterUrl ? `<a href="${resp.masterUrl}">Open master report (when ready)</a>` : '';
   pollStatus();
 }
 
 async function pollStatus() {
   const r = await fetch('/api/status');
-  const s = await r.json();
+  const s = await readJsonOrThrow(r);
   document.getElementById('status').textContent = JSON.stringify(s, null, 2);
   if (s && s.masterUrl) {
     document.getElementById('links').innerHTML = `<a href="${s.masterUrl}">Open master report</a>`;
@@ -348,32 +384,38 @@ try {
         $ctx = $listener.GetContext()
         $path = $ctx.Request.Url.AbsolutePath
         try {
+            Write-PalMassWebServerLog "$($ctx.Request.HttpMethod) $path"
             if ($path -eq "/") {
                 Send-Text -ctx $ctx -text $script:html -contentType "text/html; charset=utf-8"
                 continue
             }
 
             if ($path -eq "/api/config") {
-                $obj = [ordered]@{
-                    palRoot = $palRoot
-                    palScriptPath = $PalScriptPath
-                    availableThresholdXmls = $availableXmls
-                    defaultThresholdXmls = $defaultThresholds
-                    defaultInputPath = $DefaultInputPath
-                    defaultOutputRoot = $DefaultOutputRoot
-                    defaultThrottleLimit = $DefaultThrottleLimit
-                    defaultPalThreads = $DefaultPalThreads
-                    defaultAnalysisInterval = $DefaultAnalysisInterval
+                try {
+                    $obj = [ordered]@{
+                        palRoot = $palRoot
+                        palScriptPath = $PalScriptPath
+                        availableThresholdXmls = $availableXmls
+                        defaultThresholdXmls = $defaultThresholds
+                        defaultInputPath = $DefaultInputPath
+                        defaultOutputRoot = $DefaultOutputRoot
+                        defaultThrottleLimit = $DefaultThrottleLimit
+                        defaultPalThreads = $DefaultPalThreads
+                        defaultAnalysisInterval = $DefaultAnalysisInterval
+                        serverLog = $script:PALMassWebServerLog
+                    }
+                    Send-Json -ctx $ctx -obj $obj
+                } catch {
+                    Send-ApiErrorJson -ctx $ctx -message $_.Exception.ToString() -statusCode 500
                 }
-                Send-Json -ctx $ctx -obj $obj
                 continue
             }
 
             if ($path -eq "/api/tree") {
                 $q = $ctx.Request.QueryString["path"]
-                if ([string]::IsNullOrWhiteSpace($q)) { Send-Json -ctx $ctx -obj @{ error="Missing query param 'path'." } -statusCode 400; continue }
+                if ([string]::IsNullOrWhiteSpace($q)) { Send-ApiErrorJson -ctx $ctx -message "Missing query param 'path'." -statusCode 400; continue }
                 try {
-                    if (-not (Test-Path -LiteralPath $q)) { Send-Json -ctx $ctx -obj @{ error="Path not found: $q" } -statusCode 404; continue }
+                    if (-not (Test-Path -LiteralPath $q)) { Send-ApiErrorJson -ctx $ctx -message "Path not found: $q" -statusCode 404; continue }
                     $full = (Resolve-Path -LiteralPath $q).Path
                     $dirs = @()
                     Get-ChildItem -LiteralPath $full -Directory -ErrorAction SilentlyContinue | Sort-Object -Property Name | ForEach-Object {
@@ -388,18 +430,18 @@ try {
                     }
                     Send-Json -ctx $ctx -obj ([ordered]@{ path=$full; dirs=$dirs; blgFiles=$blgFiles })
                 } catch {
-                    Send-Json -ctx $ctx -obj @{ error = $_.Exception.Message } -statusCode 500
+                    Send-ApiErrorJson -ctx $ctx -message $_.Exception.ToString() -statusCode 500
                 }
                 continue
             }
 
             if ($path -eq "/api/start" -and $ctx.Request.HttpMethod -eq "POST") {
                 if ($global:PALMassWebJob -and $global:PALMassWebJob.State -eq "Running") {
-                    Send-Json -ctx $ctx -obj @{ error="A run is already in progress." } -statusCode 409
+                    Send-ApiErrorJson -ctx $ctx -message "A run is already in progress." -statusCode 409
                     continue
                 }
                 $body = Read-BodyJson -ctx $ctx
-                if (-not $body) { Send-Json -ctx $ctx -obj @{ error="Missing JSON body." } -statusCode 400; continue }
+                if (-not $body) { Send-ApiErrorJson -ctx $ctx -message "Missing JSON body." -statusCode 400; continue }
 
                 $out = [string]$body.outputRoot
                 if ([string]::IsNullOrWhiteSpace($out)) { $out = $DefaultOutputRoot }
@@ -464,6 +506,7 @@ try {
                     outputRoot = $global:PALMassWebOutputRoot
                     statusUrl = "/api/status"
                     masterUrl = "/out/index.html"
+                    logUrl = "/out/palmass.log"
                 }
                 Send-Json -ctx $ctx -obj $resp
                 continue
@@ -478,7 +521,7 @@ try {
                         $st | Add-Member -NotePropertyName "jobState" -NotePropertyValue $(if ($global:PALMassWebJob) { $global:PALMassWebJob.State } else { "Idle" }) -Force
                         Send-Json -ctx $ctx -obj $st
                     } catch {
-                        Send-Json -ctx $ctx -obj @{ error = $_.Exception.Message } -statusCode 500
+                        Send-ApiErrorJson -ctx $ctx -message $_.Exception.ToString() -statusCode 500
                     }
                 } else {
                     $jobState = if ($global:PALMassWebJob) { $global:PALMassWebJob.State } else { "Idle" }
@@ -520,7 +563,15 @@ try {
 
             Send-Text -ctx $ctx -text "Not found." -statusCode 404
         } catch {
-            try { Send-Text -ctx $ctx -text ("Server error: " + $_.Exception.Message) -statusCode 500 } catch { }
+            $errText = $_.Exception.ToString()
+            Write-PalMassWebServerLog "ERROR $path $errText"
+            try {
+                if ($path -and $path.StartsWith("/api/")) {
+                    Send-ApiErrorJson -ctx $ctx -message $errText -statusCode 500
+                } else {
+                    Send-Text -ctx $ctx -text ("Server error: " + $_.Exception.Message) -statusCode 500
+                }
+            } catch { }
         }
     }
 } finally {
