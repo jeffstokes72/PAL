@@ -18,12 +18,16 @@
 Ever have a performance problem, but don't know what performance counters to collect or how to analyze them?
 The PAL (Performance Analysis of Logs) tool is a powerful tool that reads in a performance monitor counter log and analyzes it using known thresholds.
 
+## Kudos / Thank You
+Huge thanks to **Clint Huffman** for creating and open-sourcing PAL. This tool has helped a lot of operators and engineers quickly turn PerfMon logs into actionable findings.
+
 ## Features
  - Thresholds files for most of the major Microsoft products such as IIS, MOSS, SQL Server, BizTalk, Exchange, and Active Directory.
  - An easy to use GUI interface which makes creating batch files for the PAL.ps1 script.
  - A GUI editor for creating or editing your own threshold files.
  - Creates an HTML based report for ease of copy/pasting into other applications.
  - Analyzes performance counter logs for thresholds using thresholds that change their criteria based on the computer's role or hardware specs.
+ - **Mass-processing launcher (PowerShell 7+)** to analyze an entire directory tree of `.blg` files and generate a master HTML index report (see Usage below).
  
  ## Requirements
  The current stable release version requires the Microsoft .NET 4.7.2 framework feature to be enabled on the Windows device.
@@ -38,8 +42,50 @@ Both files can be downloaded from the [releases section](https://github.com/clin
 ## How to use
 Run PALWizard.exe to use the PAL Wizard tool. Otherwise, use PAL.ps1 directly.
 
+### Mass processing (PowerShell 7+, multi-threaded)
+This branch adds a **simple webform launcher** and a **headless batch runner** for processing an entire directory tree of `.blg` files and producing:
+- A **mirrored output directory tree** of what was processed
+- A PAL report per BLG per selected threshold XML
+- A **master HTML report** (`index.html`) with links to each report and **worst-first highlighting**
+
+Location (FlatFile layout):
+- `PAL2/PALWizard/bin/Debug/Start-PALMassWeb.ps1`
+- `PAL2/PALWizard/bin/Debug/Invoke-PALMass.ps1`
+- `PAL2/PALWizard/bin/Debug/PALMass.ps1`
+
+Defaults (minimum set used if you don’t pick others):
+- `QuickSystemOverview.xml` (Quick System analysis / overview)
+- `SystemOverview.xml` (system analysis/reference)
+- `VMWare.xml` (VMWare)
+
+Web launcher (directory-tree picker):
+
+```powershell
+pwsh .\PAL2\PAlWizard\bin\Debug\Start-PALMassWeb.ps1
+```
+
+Headless batch (parallel):
+
+```powershell
+pwsh .\PAL2\PALWizard\bin\Debug\Invoke-PALMass.ps1 `
+  -InputPaths "C:\PerfLogs" `
+  -OutputRoot "C:\PAL_Mass_Output" `
+  -ThrottleLimit 4 `
+  -PalThreads 4
+```
+
+Outputs:
+- `OutputRoot\index.html` (master report)
+- `OutputRoot\results.csv` / `OutputRoot\results.json` (summary)
+- Per-run outputs under the mirrored tree:
+  - `...\<relative input path>\<blg name>\<threshold name>\report.htm`
+  - `...\<relative input path>\<blg name>\<threshold name>\report.xml`
+
 ## Feedback
 Your feedback is welcome via the [issues section](https://github.com/clinthuffman/PAL/issues)
 
 ## Contributing
 Your contributions are very welcome by submitting a Pull Request.
+
+## Contributors
+- **Jeff Stokes** (LinkedIn: `https://www.linkedin.com/in/jeffstokes/`)
