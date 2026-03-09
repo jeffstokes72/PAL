@@ -140,7 +140,11 @@ function Get-RelativePath {
         [Parameter(Mandatory=$true)][string] $FullPath
     )
     $base = (Resolve-Path -LiteralPath $BasePath).Path
-    $full = (Resolve-Path -LiteralPath $FullPath).Path
+    if (Test-Path -LiteralPath $FullPath) {
+        $full = (Resolve-Path -LiteralPath $FullPath).Path
+    } else {
+        $full = [IO.Path]::GetFullPath($FullPath)
+    }
 
     $baseUri = New-Object System.Uri(($base.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar))
     $fullUri = New-Object System.Uri($full)
@@ -262,7 +266,7 @@ function Write-PalMasterHtmlReport {
 
     $indexPath = Join-Path -Path $OutputRoot -ChildPath "index.html"
 
-    $sorted = @($Results | Sort-Object -Property Score -Descending, Criticals -Descending, Warnings -Descending)
+    $sorted = @($Results | Sort-Object -Property Score, Criticals, Warnings -Descending)
     $top = @($sorted | Select-Object -First $HighlightTopN)
     $topSet = @{}
     foreach ($r in $top) { $topSet[$r.RunId] = $true }
@@ -463,7 +467,7 @@ function Invoke-PalMass {
     # Process each BLG in parallel; within each BLG, run all selected threshold XMLs.
     $mainLogPath = $script:PalMassLogPath
     $results = $blg | ForEach-Object -Parallel {
-        param($blgPath)
+        $blgPath = $_
 
         . $using:palMassLibPath
         $script:PalMassLogPath = $using:mainLogPath
