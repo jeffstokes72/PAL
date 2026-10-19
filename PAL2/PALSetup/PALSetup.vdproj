@@ -27,6 +27,12 @@
         }
         "Entry"
         {
+        "MsmKey" = "8:_14D798C423064D3F8CC9EDD71D4A1AB1"
+        "OwnerKey" = "8:_UNDEFINED"
+        "MsmSig" = "8:_UNDEFINED"
+        }
+        "Entry"
+        {
         "MsmKey" = "8:_173FC80E18C34A7C95CA156D7777D621"
         "OwnerKey" = "8:_UNDEFINED"
         "MsmSig" = "8:_UNDEFINED"
@@ -2136,6 +2142,26 @@
             "IsDependency" = "11:FALSE"
             "IsolateTo" = "8:"
             }
+            "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_14D798C423064D3F8CC9EDD71D4A1AB1"
+            {
+            "SourcePath" = "8:..\\PALWizard\\bin\\Debug\\PalCharts.ps1"
+            "TargetName" = "8:PalCharts.ps1"
+            "Tag" = "8:"
+            "Folder" = "8:_CDA9879DB3D34F49AC875F16D885D93F"
+            "Condition" = "8:"
+            "Transitive" = "11:FALSE"
+            "Vital" = "11:TRUE"
+            "ReadOnly" = "11:FALSE"
+            "Hidden" = "11:FALSE"
+            "System" = "11:FALSE"
+            "Permanent" = "11:FALSE"
+            "SharedLegacy" = "11:FALSE"
+            "PackageAs" = "3:1"
+            "Register" = "3:1"
+            "Exclude" = "11:FALSE"
+            "IsDependency" = "11:FALSE"
+            "IsolateTo" = "8:"
+            }
             "{1FB2D0AE-D3B9-43D4-B9DD-F88EC61E35DE}:_FBC5E975C76B4DF1B43C3AE28FD7AB36"
             {
             "SourcePath" = "8:..\\PALWizard\\bin\\Debug\\PAL.ps1"
@@ -2363,15 +2389,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:PAL"
-        "ProductCode" = "8:{1D099492-8676-4C86-A155-78A9B85476D2}"
-        "PackageCode" = "8:{77A7C8A6-017B-44C5-89BC-0B7918FBAE13}"
+        "ProductCode" = "8:{51CA8DC9-385A-42E7-8474-D987EFE35CFA}"
+        "PackageCode" = "8:{AAE6192A-C6DA-41AB-934B-27B5D430C610}"
         "UpgradeCode" = "8:{EFD40734-67D5-4A43-AB30-8EAD17B7CF21}"
         "AspNetVersion" = "8:2.0.50727.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:FALSE"
         "InstallAllUsers" = "11:FALSE"
-        "ProductVersion" = "8:2.8.1"
+        "ProductVersion" = "8:2.8.3"
         "Manufacturer" = "8:PAL"
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:http://github.com/clinthuffman/PAL"
