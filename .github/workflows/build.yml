@@ -1,0 +1,68 @@
+name: Build PAL
+
+# Builds PALWizard.exe on Windows, runs the PowerShell tests under Windows
+# PowerShell 5.1 and PowerShell 7, and packages the flat-file zip.
+# Pushing a tag such as v2.8.3 also publishes the zip as a GitHub Release.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build PALWizard (Debug, matches the shipped layout)
+        run: msbuild PAL2\PALWizard\PALWizard.vbproj /p:Configuration=Debug /p:Platform=AnyCPU /v:minimal
+
+      - name: Test under Windows PowerShell 5.1
+        shell: cmd
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File PAL2\PALWizard\tests\Test-PalCharts.ps1
+
+      - name: Test under PowerShell 7
+        shell: pwsh
+        run: ./PAL2/PALWizard/tests/Test-PalCharts.ps1
+
+      - name: Package flat files
+        id: package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path PAL2/PALWizard/Scripts/PAL.ps1 -Pattern "^\`$Version = '([^']+)'").Matches[0].Groups[1].Value
+          if ('${{ github.ref_type }}' -eq 'tag') { $version = '${{ github.ref_name }}'.TrimStart('v') }
+          $zip = "PAL_FlatFiles_$version.zip"
+          $staging = Join-Path $env:RUNNER_TEMP 'flatfiles'
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Get-ChildItem PAL2/PALWizard/bin/Debug -File |
+            Where-Object { $_.Name -notmatch '\.pdb$|\.vshost\.' } |
+            Copy-Item -Destination $staging
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Get-ChildItem $staging | Measure-Object | ForEach-Object { "Packaged $($_.Count) files into $zip" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip }}
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PAL ${{ steps.package.outputs.version }}
+          files: ${{ steps.package.outputs.zip }}
+          generate_release_notes: true
+          body: |
+            Flat-file release of PAL. Download `${{ steps.package.outputs.zip }}`, right-click it, choose Properties, tick **Unblock**, extract to an empty folder, and run `PALWizard.exe`.
+
+            Requires Windows with Windows PowerShell 5.1 or PowerShell 7 and the inbox `relog.exe`. No installer is needed.
