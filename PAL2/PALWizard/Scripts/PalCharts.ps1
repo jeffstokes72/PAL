@@ -16,23 +16,74 @@ Function Format-SvgNumber
     return $Value.ToString('0.###', [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
-Function Test-PalChartNumber
+Function ConvertTo-PalDoubleArray
 {
-    param($Value)
-    if ($null -eq $Value) { return $false }
-    if ($Value -is [string] -and $Value.Trim() -eq '') { return $false }
-    $number = 0.0
-    return [double]::TryParse([string]$Value, [ref]$number)
+    # One pass per series. Missing or non-numeric samples become NaN so the
+    # renderers can split lines at gaps without calling back into PowerShell per point.
+    param($Values)
+    $source = @($Values)
+    $result = New-Object double[] $source.Count
+    for ($i = 0; $i -lt $source.Count; $i++)
+    {
+        $value = $source[$i]
+        $number = [double]::NaN
+        if ($value -is [double]) { $number = $value }
+        elseif ($value -is [int] -or $value -is [long] -or $value -is [decimal] -or $value -is [single]) { $number = [double]$value }
+        elseif ($null -ne $value)
+        {
+            $parsed = 0.0
+            if ([double]::TryParse([string]$value, [ref]$parsed)) { $number = $parsed }
+        }
+        if ([double]::IsInfinity($number)) { $number = [double]::NaN }
+        $result[$i] = $number
+    }
+    return ,$result
 }
 
-Function ConvertTo-PalChartDouble
+Function Get-PalPlotIndexes
 {
-    param($Value)
-    if ($Value -is [double]) { return $Value }
-    if ($Value -is [int] -or $Value -is [long] -or $Value -is [decimal] -or $Value -is [single]) { return [double]$Value }
-    $number = 0.0
-    [void][double]::TryParse([string]$Value, [ref]$number)
-    return $number
+    # Returns the sample indexes worth drawing. Short series are drawn in full. Long
+    # series are bucketed and only each bucket's min and max are kept, which preserves
+    # spikes while capping SVG size and render time. A bucket with no numeric samples
+    # contributes one NaN index so the line still breaks at a real gap.
+    param([double[]]$Values, [int]$MaxPoints)
+    $count = $Values.Length
+    $indexes = New-Object System.Collections.Generic.List[int]
+    if ($count -le $MaxPoints)
+    {
+        for ($i = 0; $i -lt $count; $i++) { [void]$indexes.Add($i) }
+        return ,$indexes.ToArray()
+    }
+
+    $bucketSize = [int][math]::Ceiling($count / ($MaxPoints / 2.0))
+    for ($start = 0; $start -lt $count; $start += $bucketSize)
+    {
+        $end = [math]::Min($start + $bucketSize, $count)
+        $minIndex = -1
+        $maxIndex = -1
+        $gapIndex = -1
+        for ($i = $start; $i -lt $end; $i++)
+        {
+            $v = $Values[$i]
+            if ([double]::IsNaN($v)) { if ($gapIndex -lt 0) { $gapIndex = $i }; continue }
+            if ($minIndex -lt 0 -or $v -lt $Values[$minIndex]) { $minIndex = $i }
+            if ($maxIndex -lt 0 -or $v -gt $Values[$maxIndex]) { $maxIndex = $i }
+        }
+        if ($minIndex -lt 0)
+        {
+            [void]$indexes.Add($gapIndex)
+        }
+        elseif ($minIndex -eq $maxIndex)
+        {
+            [void]$indexes.Add($minIndex)
+        }
+        else
+        {
+            [void]$indexes.Add([math]::Min($minIndex, $maxIndex))
+            [void]$indexes.Add([math]::Max($minIndex, $maxIndex))
+        }
+    }
+    return ,$indexes.ToArray()
 }
 
 Function Get-PalChartPalette
@@ -246,63 +297,75 @@ Function Get-PalPlotY
     return $Top + ((1.0 - $ratio) * $Height)
 }
 
+Function New-PalPlotTransform
+{
+    # Precomputed factors so the per-point loops are plain arithmetic.
+    param([int]$SampleCount, $Scale, [double]$Left, [double]$Top, [double]$PlotWidth, [double]$PlotHeight)
+    $xStep = 0.0
+    $xOffset = $Left
+    if ($SampleCount -gt 1) { $xStep = $PlotWidth / [double]($SampleCount - 1) }
+    else { $xOffset = $Left + ($PlotWidth / 2.0) }
+    $span = $Scale.Max - $Scale.Min
+    if ($span -eq 0) { $span = 1 }
+    $transform = New-Object pscustomobject
+    Add-Member -InputObject $transform -MemberType NoteProperty -Name XOffset -Value $xOffset
+    Add-Member -InputObject $transform -MemberType NoteProperty -Name XStep -Value $xStep
+    Add-Member -InputObject $transform -MemberType NoteProperty -Name YMax -Value ([double]$Scale.Max)
+    Add-Member -InputObject $transform -MemberType NoteProperty -Name YFactor -Value ($PlotHeight / $span)
+    Add-Member -InputObject $transform -MemberType NoteProperty -Name Top -Value $Top
+    return $transform
+}
+
 Function Add-PalRangeGeometry
 {
-    param($Builder, $Series, [int]$SampleCount, $Scale, [double]$Left, [double]$Top, [double]$PlotWidth, [double]$PlotHeight)
+    param($Builder, $Series, [int]$SampleCount, $Scale, [double]$Left, [double]$Top, [double]$PlotWidth, [double]$PlotHeight, [int]$MaxPoints = 1600)
 
-    $y1 = @($Series.YValues)
-    $y2 = @($Series.Y2Values)
-    $segment = New-Object System.Collections.Generic.List[object]
+    $y1 = ConvertTo-PalDoubleArray $Series.YValues
+    $y2 = ConvertTo-PalDoubleArray $Series.Y2Values
+    $limit = [math]::Min([math]::Min($y1.Length, $y2.Length), $SampleCount)
+    $indexes = Get-PalPlotIndexes -Values $y2 -MaxPoints $MaxPoints
+    $t = New-PalPlotTransform -SampleCount $SampleCount -Scale $Scale -Left $Left -Top $Top -PlotWidth $PlotWidth -PlotHeight $PlotHeight
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $xOffset = [double]$t.XOffset; $xStep = [double]$t.XStep; $yMax = [double]$t.YMax; $yFactor = [double]$t.YFactor; $top = [double]$t.Top
+
+    $highs = New-Object System.Collections.Generic.List[string]
+    $lows = New-Object System.Collections.Generic.List[string]
     $polygons = New-Object System.Collections.Generic.List[string]
     $lines = New-Object System.Collections.Generic.List[string]
 
-    for ($i = 0; $i -le $SampleCount; $i++)
+    for ($n = 0; $n -le $indexes.Length; $n++)
     {
         $hasPoint = $false
-        $low = 0.0
-        $high = 0.0
-        if ($i -lt $SampleCount -and $i -lt $y1.Count -and $i -lt $y2.Count -and (Test-PalChartNumber $y1[$i]) -and (Test-PalChartNumber $y2[$i]))
+        if ($n -lt $indexes.Length)
         {
-            $low = ConvertTo-PalChartDouble $y1[$i]
-            $high = ConvertTo-PalChartDouble $y2[$i]
-            if ($high -lt $low)
+            $i = $indexes[$n]
+            if ($i -lt $limit)
             {
-                $swap = $low
-                $low = $high
-                $high = $swap
+                $low = $y1[$i]
+                $high = $y2[$i]
+                if (-not ([double]::IsNaN($low) -or [double]::IsNaN($high)))
+                {
+                    if ($high -lt $low) { $swap = $low; $low = $high; $high = $swap }
+                    $x = ($xOffset + ($i * $xStep)).ToString('0.##', $inv)
+                    [void]$highs.Add($x + ',' + ($top + (($yMax - $high) * $yFactor)).ToString('0.##', $inv))
+                    [void]$lows.Add($x + ',' + ($top + (($yMax - $low) * $yFactor)).ToString('0.##', $inv))
+                    $hasPoint = $true
+                }
             }
-            $hasPoint = $true
-            $segment.Add(@{ Index = $i; Low = $low; High = $high })
         }
-        if ((-not $hasPoint) -or ($i -eq $SampleCount))
+        if ((-not $hasPoint) -or ($n -eq $indexes.Length))
         {
-            if ($segment.Count -ge 2)
+            if ($highs.Count -ge 2)
             {
-                $parts = New-Object System.Collections.Generic.List[string]
-                foreach ($point in $segment)
-                {
-                    $x = Format-SvgNumber (Get-PalPlotX -Index $point.Index -Count $SampleCount -Left $Left -Width $PlotWidth)
-                    $yHigh = Format-SvgNumber (Get-PalPlotY -Value $point.High -Min $Scale.Min -Max $Scale.Max -Top $Top -Height $PlotHeight)
-                    [void]$parts.Add($x + ',' + $yHigh)
-                }
-                for ($k = $segment.Count - 1; $k -ge 0; $k--)
-                {
-                    $point = $segment[$k]
-                    $x = Format-SvgNumber (Get-PalPlotX -Index $point.Index -Count $SampleCount -Left $Left -Width $PlotWidth)
-                    $yLow = Format-SvgNumber (Get-PalPlotY -Value $point.Low -Min $Scale.Min -Max $Scale.Max -Top $Top -Height $PlotHeight)
-                    [void]$parts.Add($x + ',' + $yLow)
-                }
-                [void]$polygons.Add(($parts -join ' '))
+                $lows.Reverse()
+                [void]$polygons.Add(($highs -join ' ') + ' ' + ($lows -join ' '))
             }
-            elseif ($segment.Count -eq 1)
+            elseif ($highs.Count -eq 1)
             {
-                $point = $segment[0]
-                $x = Format-SvgNumber (Get-PalPlotX -Index $point.Index -Count $SampleCount -Left $Left -Width $PlotWidth)
-                $yHigh = Format-SvgNumber (Get-PalPlotY -Value $point.High -Min $Scale.Min -Max $Scale.Max -Top $Top -Height $PlotHeight)
-                $yLow = Format-SvgNumber (Get-PalPlotY -Value $point.Low -Min $Scale.Min -Max $Scale.Max -Top $Top -Height $PlotHeight)
-                [void]$lines.Add($x + ',' + $yHigh + ' ' + $x + ',' + $yLow)
+                [void]$lines.Add($highs[0] + ' ' + $lows[0])
             }
-            $segment.Clear()
+            $highs.Clear()
+            $lows.Clear()
         }
     }
 
@@ -318,36 +381,51 @@ Function Add-PalRangeGeometry
 
 Function Add-PalLineGeometry
 {
-    param($Builder, $Series, [int]$SampleCount, $Scale, [double]$Left, [double]$Top, [double]$PlotWidth, [double]$PlotHeight)
+    param($Builder, $Series, [int]$SampleCount, $Scale, [double]$Left, [double]$Top, [double]$PlotWidth, [double]$PlotHeight, [int]$MaxPoints = 1600)
 
-    $ys = @($Series.YValues)
+    $ys = ConvertTo-PalDoubleArray $Series.YValues
+    $limit = [math]::Min($ys.Length, $SampleCount)
+    $indexes = Get-PalPlotIndexes -Values $ys -MaxPoints $MaxPoints
+    $t = New-PalPlotTransform -SampleCount $SampleCount -Scale $Scale -Left $Left -Top $Top -PlotWidth $PlotWidth -PlotHeight $PlotHeight
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $xOffset = [double]$t.XOffset; $xStep = [double]$t.XStep; $yMax = [double]$t.YMax; $yFactor = [double]$t.YFactor; $top = [double]$t.Top
+
     $segment = New-Object System.Collections.Generic.List[string]
     $width = 2.5
     if ($null -ne $Series.PSObject.Properties['BorderWidth'] -and $Series.BorderWidth -gt 0) { $width = [double]$Series.BorderWidth }
     $dash = ConvertTo-PalDashArray -DashStyle $Series.DashStyle -Width $width
     $dashAttr = ''
     if ($dash -ne '') { $dashAttr = ' stroke-dasharray="' + $dash + '"' }
+    $lineOpen = '    <polyline points="'
+    $lineClose = '" fill="none" stroke="' + $Series.Color + '" stroke-width="' + (Format-SvgNumber $width) + '" stroke-linejoin="round" stroke-linecap="round"' + $dashAttr + '/>'
+    $dotRadius = Format-SvgNumber ([math]::Max(2.5, $width))
 
-    for ($i = 0; $i -le $ys.Count; $i++)
+    for ($n = 0; $n -le $indexes.Length; $n++)
     {
         $hasPoint = $false
-        if ($i -lt $ys.Count -and $i -lt $SampleCount -and (Test-PalChartNumber $ys[$i]))
+        if ($n -lt $indexes.Length)
         {
-            $x = Format-SvgNumber (Get-PalPlotX -Index $i -Count $SampleCount -Left $Left -Width $PlotWidth)
-            $y = Format-SvgNumber (Get-PalPlotY -Value (ConvertTo-PalChartDouble $ys[$i]) -Min $Scale.Min -Max $Scale.Max -Top $Top -Height $PlotHeight)
-            [void]$segment.Add($x + ',' + $y)
-            $hasPoint = $true
+            $i = $indexes[$n]
+            if ($i -lt $limit)
+            {
+                $v = $ys[$i]
+                if (-not [double]::IsNaN($v))
+                {
+                    [void]$segment.Add(($xOffset + ($i * $xStep)).ToString('0.##', $inv) + ',' + ($top + (($yMax - $v) * $yFactor)).ToString('0.##', $inv))
+                    $hasPoint = $true
+                }
+            }
         }
-        if ((-not $hasPoint) -or ($i -eq $ys.Count))
+        if ((-not $hasPoint) -or ($n -eq $indexes.Length))
         {
             if ($segment.Count -ge 2)
             {
-                [void]$Builder.AppendLine('    <polyline points="' + ($segment -join ' ') + '" fill="none" stroke="' + $Series.Color + '" stroke-width="' + (Format-SvgNumber $width) + '" stroke-linejoin="round" stroke-linecap="round"' + $dashAttr + '/>')
+                [void]$Builder.AppendLine($lineOpen + ($segment -join ' ') + $lineClose)
             }
             elseif ($segment.Count -eq 1)
             {
                 $parts = $segment[0].Split(',')
-                [void]$Builder.AppendLine('    <circle cx="' + $parts[0] + '" cy="' + $parts[1] + '" r="' + (Format-SvgNumber ([math]::Max(2.5, $width))) + '" fill="' + $Series.Color + '"/>')
+                [void]$Builder.AppendLine('    <circle cx="' + $parts[0] + '" cy="' + $parts[1] + '" r="' + $dotRadius + '" fill="' + $Series.Color + '"/>')
             }
             $segment.Clear()
         }
@@ -361,7 +439,9 @@ Function Write-PalChart
     $seriesList = @($SeriesObjects | Where-Object { $null -ne $_ })
     $sampleCount = 0
     $xLabels = @()
-    $numeric = New-Object System.Collections.Generic.List[double]
+    $numericCount = 0
+    $min = [double]::MaxValue
+    $max = [double]::MinValue
     foreach ($series in $seriesList)
     {
         $xs = @($series.XValues)
@@ -370,10 +450,15 @@ Function Write-PalChart
             $sampleCount = $xs.Count
             $xLabels = $xs
         }
-        $candidates = @($series.YValues) + @($series.Y2Values)
-        foreach ($candidate in $candidates)
+        foreach ($values in @((ConvertTo-PalDoubleArray $series.YValues), (ConvertTo-PalDoubleArray $series.Y2Values)))
         {
-            if (Test-PalChartNumber $candidate) { [void]$numeric.Add((ConvertTo-PalChartDouble $candidate)) }
+            foreach ($v in $values)
+            {
+                if ([double]::IsNaN($v)) { continue }
+                $numericCount++
+                if ($v -lt $min) { $min = $v }
+                if ($v -gt $max) { $max = $v }
+            }
         }
         $ys = @($series.YValues)
         if ($ys.Count -gt $sampleCount) { $sampleCount = $ys.Count }
@@ -397,14 +482,12 @@ Function Write-PalChart
 
     $culture = Get-PalChartCulture
     $scale = $null
-    if ($numeric.Count -eq 0)
+    if ($numericCount -eq 0)
     {
         $scale = Get-PalAxisScale -Min 0 -Max 1
     }
     else
     {
-        $min = ($numeric | Measure-Object -Minimum).Minimum
-        $max = ($numeric | Measure-Object -Maximum).Maximum
         $scale = Get-PalAxisScale -Min $min -Max $max
     }
 
@@ -490,7 +573,7 @@ Function Write-PalChart
 
     [void]$sb.AppendLine('  <defs><clipPath id="' + $clipId + '"><rect x="' + (Format-SvgNumber $left) + '" y="' + (Format-SvgNumber $top) + '" width="' + (Format-SvgNumber $plotWidth) + '" height="' + (Format-SvgNumber $plotHeight) + '"/></clipPath></defs>')
     [void]$sb.AppendLine('  <g clip-path="url(#' + $clipId + ')">')
-    if ($numeric.Count -eq 0)
+    if ($numericCount -eq 0)
     {
         [void]$sb.AppendLine('    <text x="' + (Format-SvgNumber ($left + ($plotWidth / 2))) + '" y="' + (Format-SvgNumber ($top + ($plotHeight / 2))) + '" text-anchor="middle" font-family="Segoe UI, Tahoma, Arial, sans-serif" font-size="14" fill="#667384">No numeric samples</text>')
     }

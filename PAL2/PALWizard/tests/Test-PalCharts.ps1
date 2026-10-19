@@ -1,5 +1,7 @@
 # Exercises the SVG chart writer and the log-conversion argument fix.
-# Run from any directory: pwsh -File PAL2/PALWizard/tests/Test-PalCharts.ps1
+# Run from any directory with Windows PowerShell 5.1 or PowerShell 7:
+#   powershell -ExecutionPolicy Bypass -File PAL2\PALWizard\tests\Test-PalCharts.ps1
+#   pwsh -File PAL2/PALWizard/tests/Test-PalCharts.ps1
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -108,6 +110,30 @@ for ($n = 0; $n -lt 3; $n++)
 }
 $created = @(CreatePalCharts -ArrayListOfCounterSeries $many -ArrayListOfThresholdSeries $thresholds -MaxNumberOfItemsInChart 2 -OutputDirectoryPath ($sampleDir + [IO.Path]::DirectorySeparatorChar) -ImageFileName 'split' -ChartTitle 'Split instances')
 Assert-True ($created.Count -eq 2) "twelve-instance cap splits charts (got $($created.Count))"
+
+$bigCount = 5760
+$bigTimes = New-Object object[] $bigCount
+$bigValues = New-Object object[] $bigCount
+for ($i = 0; $i -lt $bigCount; $i++)
+{
+    $bigTimes[$i] = $start.AddSeconds(15 * $i)
+    if ($i -ge 3000 -and $i -lt 3100) { $bigValues[$i] = '-' }
+    else { $bigValues[$i] = 20.0 }
+}
+$bigValues[2500] = 99.0
+$bigSeries = New-Object System.Collections.ArrayList
+[void]$bigSeries.Add((New-PalChartSeries -Name 'big' -ChartType 'Line' -Color '#0072B2' -XValues $bigTimes -YValues $bigValues -Y2Values @()))
+$bigSw = [System.Diagnostics.Stopwatch]::StartNew()
+$bigPath = Write-PalChart -ChartTitle 'Downsampled' -SaveFilePath (Join-Path $sampleDir 'big0.svg') -SeriesObjects $bigSeries
+$bigSw.Stop()
+$bigText = Get-Content -Path $bigPath -Raw
+$bigPoints = ([regex]::Matches($bigText, '[\d.]+,[\d.]+')).Count
+Assert-True ($bigPoints -lt 2000) "a long series is downsampled for rendering ($bigPoints points for $bigCount samples)"
+Assert-True (([regex]::Matches($bigText, '<polyline ')).Count -eq 2) 'a gap survives downsampling and still splits the line'
+$bigIndexes = Get-PalPlotIndexes -Values (ConvertTo-PalDoubleArray $bigValues) -MaxPoints 1600
+Assert-True ($bigIndexes -contains 2500) 'a one-sample spike survives downsampling'
+Assert-True (@($bigIndexes | Where-Object { $_ -ge 3000 -and $_ -lt 3100 }).Count -ge 1) 'an all-gap bucket keeps a gap marker'
+Assert-True ($bigSw.Elapsed.TotalSeconds -lt 10) "a 24h/15s chart renders in reasonable time ($([math]::Round($bigSw.Elapsed.TotalSeconds, 2))s)"
 
 $htmlPath = Join-Path $sampleDir 'report.html'
 @"
