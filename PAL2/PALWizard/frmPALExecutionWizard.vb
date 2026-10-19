@@ -19,7 +19,7 @@ Public Class frmPALExecutionWizard
     Dim oCommandsQueue As New PALFunctions.PALCommandQueueObject
     Const DEFAULT_OUTPUT_DIRECTORY As String = "[My Documents]\PAL Reports"
     Dim iUB As Integer = -1 'Upper bound of oCommandQueue.aCommandQueues 
-    Const PAL_VERSION As String = "v2.8.1"
+    Const PAL_VERSION As String = "v2.8.3"
 
     Private Function AutoDetectMatchCounterObjectsInLogToThresholdFiles(ByRef ListOfCounterObjectsFromCounterLog As List(Of String))
         Dim sArgs As String

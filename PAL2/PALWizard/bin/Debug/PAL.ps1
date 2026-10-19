@@ -31,15 +31,18 @@ if($ClearLog){
 #// Global changable variables
 #///////////////////////////////
 
-$Version = '2.8.1'
+$Version = '2.8.3'
 $AutoAnalysisIntervalNumberOfTimeSlices = 30
 
 #// Chart Settings
-$CHART_LINE_THICKNESS = 3 #// 2 is thin, 3 is normal, 4 is thick
-$CHART_WIDTH = 620        #// Width in pixels
-$CHART_HEIGHT = 620       #// height in pixels
-$CHART_MAX_INSTANCES = 12 #// the maximum number of counter instance in a chart
-$CHART_MAX_NUMBER_OF_AXIS_X_INTERVALS = 30 #// The maximum allowed X axis labels in the chart.
+$CHART_LINE_THICKNESS = 2.5
+$CHART_WIDTH = 960
+$CHART_HEIGHT = 520
+$CHART_MAX_INSTANCES = 12 #// the maximum number of counter instances in one chart
+$CHART_MAX_NUMBER_OF_AXIS_X_INTERVALS = 8
+
+$PalScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $PalScriptDirectory 'PalCharts.ps1')
 
 #//////////////////////////////////////////////////////////////////
 #// Global unchangable variables - DO NOT CHANGE THESE VARIABLES
@@ -1157,121 +1160,180 @@ Function GetLogNameFromLogParameter
     GetFileNameFromFilePath -FilePath $aSplitBySemiColon[0]
 }
 
+Function Format-RelogArguments
+{
+    param([string[]]$InputPaths, [string]$OutputPath, [string]$BeginTime, [string]$EndTime)
+    $argList = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @($InputPaths))
+    {
+        if (-not [string]::IsNullOrWhiteSpace($path))
+        {
+            [void]$argList.Add($path.Trim())
+        }
+    }
+    [void]$argList.Add('-f')
+    [void]$argList.Add('csv')
+    [void]$argList.Add('-o')
+    [void]$argList.Add($OutputPath)
+    [void]$argList.Add('-y')
+    if ((-not [string]::IsNullOrWhiteSpace($BeginTime)) -and (-not [string]::IsNullOrWhiteSpace($EndTime)))
+    {
+        [void]$argList.Add('-b')
+        [void]$argList.Add($BeginTime)
+        [void]$argList.Add('-e')
+        [void]$argList.Add($EndTime)
+    }
+    return ,$argList.ToArray()
+}
+
+Function ConvertTo-WindowsProcessArguments
+{
+    param([string[]]$ArgumentList)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($arg in @($ArgumentList))
+    {
+        if ($null -eq $arg) { [void]$parts.Add('""'); continue }
+        $needsQuotes = $false
+        foreach ($ch in @(' ', '"', "`t"))
+        {
+            if ($arg.Contains($ch)) { $needsQuotes = $true }
+        }
+        if ($needsQuotes)
+        {
+            [void]$parts.Add('"' + $arg.Replace('"','\"') + '"')
+        }
+        else
+        {
+            [void]$parts.Add($arg)
+        }
+    }
+    return ($parts -join ' ')
+}
+
+Function ConvertTo-RelogOutputLines
+{
+    param([string]$Text)
+    $linesOut = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrEmpty($Text)) { return ,@() }
+    foreach ($line in ($Text -split "\r\n|\n|\r"))
+    {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '') { continue }
+        if ($trimmed -match '^\d+(\.\d+)?\s*%$') { continue }
+        [void]$linesOut.Add($trimmed)
+    }
+    return ,$linesOut.ToArray()
+}
+
+Function Invoke-RelogProcess
+{
+    param([string[]]$ArgumentList)
+    $result = New-Object pscustomobject
+    Add-Member -InputObject $result -MemberType NoteProperty -Name ExitCode -Value -1
+    Add-Member -InputObject $result -MemberType NoteProperty -Name Lines -Value @()
+    Add-Member -InputObject $result -MemberType NoteProperty -Name Text -Value ''
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'relog.exe'
+    $psi.Arguments = ConvertTo-WindowsProcessArguments -ArgumentList $ArgumentList
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    try
+    {
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        $linesOut = ConvertTo-RelogOutputLines -Text ($stdout + "`n" + $stderr)
+        $result.ExitCode = $proc.ExitCode
+        $result.Lines = $linesOut
+        $result.Text = ($linesOut -join "`n")
+    }
+    catch
+    {
+        $result.ExitCode = 9009
+        $result.Text = [string]$_.Exception.Message
+        $result.Lines = @($result.Text)
+    }
+    return $result
+}
+
 Function MergeConvertFilterPerfmonLogs
 {
     param($sPerfmonLogPaths, $BeginTime=$null, $EndTime=$null)
     $sCommand = ''
-    $RelogOutput = ''
+    $RelogOutput = @()
     $IsSingleCsvFile = CheckIsSingleCsvFile -sPerfmonLogPaths $sPerfmonLogPaths
 	$global:oPal.RelogedLogFilePath = $global:oPal.Session.SessionWorkingDirectory + "\_FilteredPerfmonLog.csv"
     $global:sFirstCounterLogFilePath = $sPerfmonLogPaths
 
 	If ($IsSingleCsvFile -eq $False)
 	{
-		$sTemp = ''
+        $inputPaths = @()
 		If ($sPerfmonLogPaths.Contains(';'))
 		{
 			$aPerfmonLogPaths = $sPerfmonLogPaths.Split(';')
             $global:sFirstCounterLogFilePath = $aPerfmonLogPaths[0]
-			For ($f=0;$f -lt $aPerfmonLogPaths.length;$f++)
-			{
-				$sTemp = $sTemp + " " + "`"" + $aPerfmonLogPaths[$f] + "`""
-			}
-			$sTemp = $sTemp.Trim()
-
-            #// Dont filter anymore. Filtering causes problems with counter language translation
-            $sCommand = $('relog.exe ' + "`"$sTemp`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"")
-
-            #If ($global:oPal.ArgsProcessed.AllCounterStats -eq $True)
-            #{
-            #    $sCommand = $('relog.exe ' + "`"$sTemp`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"")
-            #}
-            #Else
-            #{
-            #    $sCommand = $('relog.exe ' + "`"$sTemp`"" + ' -cf ' + "`"$($global:oPal.Session.CounterListFilePath)`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"")
-            #}
+            $inputPaths = @($aPerfmonLogPaths | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 		}
 		Else
 		{
             $global:sFirstCounterLogFilePath = $sPerfmonLogPaths
-
-            #// Dont filter anymore. Filtering causes problems with counter language translation
-            $sCommand = $('relog.exe ' + "`"$sPerfmonLogPaths`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"" + ' -y')
-
-            #If ($global:oPal.ArgsProcessed.AllCounterStats -eq $True)
-            #{
-            #    $sCommand = $('relog.exe ' + "`"$sPerfmonLogPaths`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"" + ' -y')
-            #}
-            #Else
-            #{
-            #    $sCommand = 'relog.exe ' + "`"$sPerfmonLogPaths`"" + ' -cf ' + "`"$($global:oPal.Session.CounterListFilterFilePath)`"" + ' -f csv -o ' + "`"$($global:oPal.RelogedLogFilePath)`"" + ' -y'
-            #}
+            $inputPaths = @($sPerfmonLogPaths)
 		}
+
+        $rangeBegin = $null
+        $rangeEnd = $null
+        If (($null -ne $global:oPal.ArgsProcessed.BeginTime) -and ($null -ne $global:oPal.ArgsProcessed.EndTime))
+        {
+            $rangeBegin = [string]$global:oPal.ArgsProcessed.BeginTime
+            $rangeEnd = [string]$global:oPal.ArgsProcessed.EndTime
+        }
+
+        $relogArgs = Format-RelogArguments -InputPaths $inputPaths -OutputPath $global:oPal.RelogedLogFilePath -BeginTime $rangeBegin -EndTime $rangeEnd
+        $sCommand = 'relog.exe ' + (ConvertTo-WindowsProcessArguments -ArgumentList $relogArgs)
+        Write-Host $sCommand
+        Write-Host ''
+        $relogResult = Invoke-RelogProcess -ArgumentList $relogArgs
+        $RelogOutput = @($relogResult.Lines)
+
+        if (($relogResult.ExitCode -ne 0) -or (-not (Test-Path -Path $global:oPal.RelogedLogFilePath)))
+        {
+		    $sError = '[MergeConvertFilterPerfmonLogs] ERROR: Unable to find the converted log file: ' + "$($global:oPal.RelogedLogFilePath). " + "relog.exe failed (exit $($relogResult.ExitCode)). Command: $sCommand. $($relogResult.Text)"
+            WriteErrorToHtmlAndShow -sError $sError
+            Write-Error $sError
+		    Break Main
+        }
+
+        $sRelogOutputAsSingleString = [string]::Join('', @($RelogOutput))
+        If ($sRelogOutputAsSingleString.Contains('No data to return.') -eq $True)
+        {
+            $sError = 'Relog.exe returned no samples. The log may be empty, still open by a data collector, or outside the selected time range. Command: ' + $sCommand
+            WriteErrorToHtmlAndShow -sError $sError
+            Break Main
+        }
+
+        $NumberOfSamples = GetNumberOfSamplesFromRelogOutput -sRelogOutput $RelogOutput
+        If (($NumberOfSamples -is [System.Int32]) -and ($NumberOfSamples -lt 10))
+        {
+            $sText = "ERROR: Not enough samples in the counter log to properly process. Create another performance counter log with more samples in it and try again. Number of samples is: $NumberOfSamples"
+            Write-Error $sText
+            WriteErrorToHtmlAndShow -sError $sText
+            Break Main
+        }
 	}
 	Else
 	{
-        #// Just use the original CSV perfmon log.
         $global:oPal.RelogedLogFilePath = $sPerfmonLogPaths
         $global:sFirstCounterLogFilePath = $sPerfmonLogPaths
-	}
-    
-    If (($global:oPal.ArgsProcessed.BeginTime -ne $null) -and ($global:oPal.ArgsProcessed.EndTime -ne $null))
-    {
-        #// Fix provided by kwomba
-        $sCommand = "$sCommand" + ' -b ' + "`"$($global:oPal.ArgsProcessed.BeginTime)`"" + ' -e ' + "`"$($global:oPal.ArgsProcessed.EndTime)`""
-    }
-    
-    If ($IsSingleCsvFile -eq $False)
-    {
-        Write-Host $sCommand
-        Write-Host ''
-        $RelogOutput = Invoke-Expression -Command $sCommand
-        #// Remove the extra blank lines and relog progress bar.
-        $RelogOutput | ForEach-Object {If (($_ -ne '') -and ($_.SubString(0,1) -ne 0)) {$_}}
-    }
-    
-    $sRelogOutputAsSingleString = [string]::join("", $RelogOutput)
-    If ($sRelogOutputAsSingleString.contains('No data to return.') -eq $True)
-    {
-        
-        $sError = "Relog.exe failed to process the log. This commonly occurs when a BLG file from a Windows Vista or newer operating system is attempting to be analyze on Windows XP or Windows Server 2003, or due to log corruption. If you see this message on Windows XP or Server 2003, then try analyzing the log on Windows Vista/Server 2008 or later. Review the results above this line. If relog.exe continues to fail, then try running Relog.exe manually and/or contact Microsoft Customer Support Servers for support on Relog.exe only. PAL is not supported by Microsoft."
-        WriteErrorToHtmlAndShow -sError $sError
-        Break Main
-    }
-    
-	$NewLogExists = Test-Path -Path $global:oPal.RelogedLogFilePath
-	If ($NewLogExists -eq $False)
-	{	
-		$sError = $('[MergeConvertFilterPerfmonLogs] ERROR: Unable to find the converted log file: ' + "$($global:oPal.RelogedLogFilePath). " + "Relog.exe failed to process the log. Review the results above this line. If relog.exe continues to fail, then try running Relog.exe manually and/or contact Microsoft Customer Support Servers for support on Relog.exe only. PAL is not supported by Microsoft.")
-        WriteErrorToHtmlAndShow -sError $sError
-        Write-Error $sError
-		Break Main
-	}
-
-    If (($IsSingleCsvFile -eq $False) -and ($RelogOutput -ne $null))
-    {
-        If ($(IsSamplesInPerfmonLog -RelogOutput $RelogOutput) -eq $False)
+        If (($null -ne $global:oPal.ArgsProcessed.BeginTime) -and ($null -ne $global:oPal.ArgsProcessed.EndTime))
         {
-    		$sError = $("[MergeConvertFilterPerfmonLogs] ERROR: Unable to use the log file(s): " + "$($global:oPal.ArgsOriginal.Log). " + "The counters in the log(s) do not contain any useable samples.")
-            WriteErrorToHtmlAndShow -sError $sError
-            Write-Error $sError
-    		Break Main
+            Write-Warning 'Begin and end times are applied by relog.exe for binary counter logs. This CSV log is analyzed in full.'
         }
-    }
-    If ($RelogOutput -ne $null)
-    {
-        $NumberOfSamples = GetNumberOfSamplesFromRelogOutput -sRelogOutput $RelogOutput
-        If ($NumberOfSamples -is [System.Int32])
-        {
-            If ($NumberOfSamples -lt 10)
-            {
-                $sText = $("ERROR: Not enough samples in the counter log to properly process. Create another performance counter log with more samples in it and try again. Number of samples is: " + "$NumberOfSamples")
-                Write-Error $sText
-                WriteErrorToHtmlAndShow -sError $sText
-                Break Main
-            }
-        }
-    }
+	}
 }
 
 Function GetCounterList
@@ -2551,7 +2613,14 @@ Function LoadCounterDataIntoXml
             }
         }
         $iJobCount = @(Get-Job).Count
-        $iPercentComplete = ConvertToDataType $(($iIndexOfJobs / $iTotalJobs) * 100) 'integer'
+        if ($iTotalJobs -gt 0)
+        {
+            $iPercentComplete = ConvertToDataType $(($iIndexOfJobs / $iTotalJobs) * 100) 'integer'
+        }
+        else
+        {
+            $iPercentComplete = 100
+        }
         If ($iPercentComplete -gt 100)
         {
             $iPercentComplete = 100
@@ -2915,7 +2984,14 @@ Function GenerateDataSources
         			    #//$global:htCodeReplacements = @{}
                         PrepareGeneratedCodeReplacements -XmlAnalysisInstance $XmlAnalysisInstance
             			GenerateDataSourceData -XmlGeneratedDataSource $XmlDataSource
-                        $iPercentComplete = ConvertToDataType $(($iDsNum / $iNumOfGeneratedCounters) * 100) 'integer'
+                        if ($iNumOfGeneratedCounters -gt 0)
+                        {
+                            $iPercentComplete = ConvertToDataType $(($iDsNum / $iNumOfGeneratedCounters) * 100) 'integer'
+                        }
+                        else
+                        {
+                            $iPercentComplete = 100
+                        }
                         $sComplete = "Progress: $iPercentComplete% (Datasource $iDsNum of $iNumOfGeneratedCounters)"
                         Write-Progress -activity "Creating generated counter data..." -status $sComplete -percentcomplete $iPercentComplete -id 2;
                         $iDsNum++
@@ -2933,148 +3009,59 @@ Function GenerateDataSources
     Write-Host "Creating generated counter data... Done! [$dtDuration seconds]"
 }
 
-Function GenerateMSChart
-{
-    param($sChartTitle, $sSaveFilePath, $htOfSeriesObjects)
-    
-	#// GAC the Microsoft Chart Controls just in case it is not GAC'd.
-	#// Requires the .NET Framework v3.5 Service Pack 1 or greater.
-	$oPALPosition= New-Object System.Windows.Forms.DataVisualization.Charting.ElementPosition
-	$oPALChart = New-Object System.Windows.Forms.DataVisualization.Charting.Chart
-	$oPALChartArea = New-Object System.Windows.Forms.DataVisualization.Charting.ChartArea
-	$fontNormal = new-object System.Drawing.Font("Tahoma",10,[Drawing.FontStyle]'Regular')
-
-	$sFormat = "#" + $global:oPal.Session.LocalizedThousandsSeparator + "###" + $global:oPal.Session.LocalizedDecimal + "###"		
-	$oPALChartArea.AxisY.LabelStyle.Format = $sFormat
-	$oPALChartArea.AxisY.LabelStyle.Font = $fontNormal
-   	$oPALChartArea.AxisX.LabelStyle.Angle = 90
- 
-    $oPALChartArea.AxisX.Interval = $global:ChartSettings.XInterval
-	$oPALChart.ChartAreas["Default"] = $oPALChartArea
-	
-    #// Add each of the Series objects to the chart.
-	ForEach ($Series in $htOfSeriesObjects)
-	{
-		$oPALChart.Series[$Series.Name] = $Series
-	}
-	
-	#// Chart size
-	$oChartSize = New-Object System.Drawing.Size
-	$oChartSize.Width = $global:ChartSettings.Width
-	$oChartSize.Height = $global:ChartSettings.Height
-	$oPALChart.Size = $oChartSize
-	
-	#// Chart Title
-    $oChartTitle = $oPALChart.Titles.Add($sChartTitle)
-    $oFontSize = $oChartTitle.Font.Size
-    $oFontSize = 12
-    $oChartTitle.Font = New-Object System.Drawing.Font($oChartTitle.Font.Name, $oFontSize, $oChartTitle.Font.Style, $oChartTitle.Font.Unit)
-	
-	#// Chart Legend
-	$oLegend = New-Object System.Windows.Forms.DataVisualization.Charting.Legend
-    $oLegend.Docking = "Bottom"
-    $oLegend.LegendStyle = "Table"
-	[Void] $oPALChart.Legends.Add($oLegend)
-
-	#// Save the chart image to a PNG file. PNG files are better quality images.
-	$oPALChartImageFormat = [System.Windows.Forms.DataVisualization.Charting.ChartImageFormat]"Png"
-    $sSaveFilePath
-	[Void] $oPALChart.SaveImage($sSaveFilePath, $oPALChartImageFormat)	
-}
-
-Function CreatePalCharts
-{
-    param([System.Collections.ArrayList] $ArrayListOfCounterSeries, [System.Collections.ArrayList] $ArrayListOfThresholdSeries, [System.Int32] $MaxNumberOfItemsInChart = 10, [System.String] $OutputDirectoryPath = '', [System.String] $ImageFileName = '', [System.String] $ChartTitle = '')
-    $alOfChartFilesPaths = New-Object System.Collections.ArrayList
-    
-    If ($ArrayListOfCounterSeries.Count -eq 0)
-    {
-        Return $alOfChartFilesPaths
-    }
-    
-    [System.Int32] $a = 0
-    [System.Int32] $iChartNumber = 0
-    [System.String] $sFilePath = ''
-    [System.Boolean] $bFileExists = $False
-    Do 
-    {
-        $alNewChartSeries = New-Object System.Collections.ArrayList
-        #// Add thresholds
-        For ($t=0;$t -lt $ArrayListOfThresholdSeries.Count;$t++)
-        {
-            $alNewChartSeries += $ArrayListOfThresholdSeries[$t]
-        }        
-        #// Add counter instances
-        If (($ArrayListOfCounterSeries.Count - 1 - $a) -gt $MaxNumberOfItemsInChart)
-        {
-            $b = 0
-            Do
-            {
-                $alNewChartSeries += $ArrayListOfCounterSeries[$a]
-                $a++
-                $b++
-            } until ($b -ge $MaxNumberOfItemsInChart)
-        }
-        Else
-        {
-            Do
-            {
-                $alNewChartSeries += $ArrayListOfCounterSeries[$a]
-                $a++
-            } until ($a -ge $ArrayListOfCounterSeries.Count)
-        }
-
-        #// Write chart
-        $iChartNumber = 0
-        Do
-        {
-            $sFilePath = $OutputDirectoryPath + $ImageFileName + "$iChartNumber" + '.png'
-            $bFileExists = Test-Path -Path $sFilePath
-            $iChartNumber++
-        } until ($bFileExists -eq $False)
-        $sFilePath = GenerateMSChart $ChartTitle $sFilePath $alNewChartSeries
-        $alOfChartFilesPaths += $sFilePath        
-    } until ($a -ge $ArrayListOfCounterSeries.Count)
-    $alOfChartFilesPaths    
-}
-
 Function MakeNumeric
 {
 	param($Values)
-	#// Make an array all numeric
-    $alNewArray = New-Object System.Collections.ArrayList
-    If (($Values -is [System.Collections.ArrayList]) -or ($Values -is [Array]))
-    {    	
-    	For ($i=0;$i -lt $Values.Count;$i++)
-    	{
-    		If ($(IsNumeric -Value $Values[$i]) -eq $True)
-    		{
-    			[Void] $alNewArray.Add([System.Double]$Values[$i])
-    		}
-    	}    	
-    }
-    Else
+	#// Always return a real [double[]] so a single sample still has GetUpperBound.
+    $alNewArray = New-Object System.Collections.Generic.List[double]
+    $items = @()
+    if ($null -ne $Values)
     {
-        [Void] $alNewArray.Add([System.Double]$Values)
+        if (($Values -is [System.Collections.IEnumerable]) -and ($Values -isnot [string]))
+        {
+            $items = $Values
+        }
+        else
+        {
+            $items = @($Values)
+        }
     }
-    $alNewArray
+    foreach ($item in @($items))
+    {
+        if ($item -is [double] -or $item -is [int] -or $item -is [long] -or $item -is [decimal] -or $item -is [single])
+        {
+            [void]$alNewArray.Add([double]$item)
+        }
+        elseif ($(IsNumeric -Value $item) -eq $True)
+        {
+            [void]$alNewArray.Add([double]$item)
+        }
+    }
+    return ,$alNewArray.ToArray()
 }
 
 Function ReduceArrayValuesToMax
 {
     param($aValues,$ChartMaxLimit)
 
-    $ChartMaxLimit = MakeNumeric -Values $ChartMaxLimit
-    $iValues = MakeNumeric -Values $aValues
-    For ($i=0;$i -le $iValues.GetUpperBound(0);$i++)
+    $limits = MakeNumeric -Values $ChartMaxLimit
+    $limit = $null
+    if ($limits.Length -gt 0)
     {
-        
-        If ($iValues[$i] -gt $ChartMaxLimit)
+        $limit = $limits[0]
+    }
+    $iValues = MakeNumeric -Values $aValues
+    if ($null -ne $limit)
+    {
+        for ($i = 0; $i -lt $iValues.Length; $i++)
         {
-            $iValues[$i] = $ChartMaxLimit
+            if ($iValues[$i] -gt $limit)
+            {
+                $iValues[$i] = $limit
+            }
         }
     }
-    Return $iValues
+    return ,$iValues
 }
 
 Function ExtractSqlNamedInstanceFromCounterObjectPath
@@ -3179,121 +3166,6 @@ Function ConvertCounterToFileName
 	Return $sResult
 }
 
-Function AddADashStyle
-{
-    param($Series,$DashStyleNumber)
-    
-    If ($DashStyleNumber -gt 3)
-    {
-        do 
-        {$DashStyleNumber = $DashStyleNumber - 4} until ($DashStyleNumber -le 3)
-    }
-    
-    switch ($DashStyleNumber)
-    {
-    	0 {$Series.BorderDashStyle = [System.Windows.Forms.DataVisualization.Charting.ChartDashStyle]"Solid"}
-        1 {$Series.BorderDashStyle = [System.Windows.Forms.DataVisualization.Charting.ChartDashStyle]"Dash"}
-    	2 {$Series.BorderDashStyle = [System.Windows.Forms.DataVisualization.Charting.ChartDashStyle]"DashDot"}
-    	3 {$Series.BorderDashStyle = [System.Windows.Forms.DataVisualization.Charting.ChartDashStyle]"Dot"}
-		default {$Series.BorderDashStyle = [System.Windows.Forms.DataVisualization.Charting.ChartDashStyle]"Solid"}
-    }
-	$Series
-}
-
-Function ConvertCounterArraysToSeriesHashTable
-{
-    param($alSeries, $aDateTimes, $htOfCounterValues, $IsThresholdsEnabled, $dWarningMin, $dWarningMax, $dCriticalMin, $dCriticalMax, $sBackGradientStyle="TopBottom")
-
-	If ($IsThresholdsEnabled -eq $True)
-	{
-        If ($dWarningMax -ne $null)
-        {
-    		#// Add Warning Threshold values
-    		$SeriesWarningThreshold = New-Object System.Windows.Forms.DataVisualization.Charting.Series
-    		For ($a=0; $a -lt $aDateTimes.length; $a++)
-    		{
-                If ($sBackGradientStyle -eq "BottomTop")
-                {
-                    [Void] $SeriesWarningThreshold.Points.Add($dWarningMax[$a], $dWarningMin[$a])
-                }
-                Else
-                {
-                    [Void] $SeriesWarningThreshold.Points.Add($dWarningMin[$a], $dWarningMax[$a])
-                }
-    		}
-    		$SeriesWarningThreshold.ChartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]"Range"
-    		$SeriesWarningThreshold.Name = "Warning"
-            If ($sBackGradientStyle -eq "BottomTop")
-            {
-        		$SeriesWarningThreshold.Color = [System.Drawing.Color]"Transparent"
-                $SeriesWarningThreshold.BackImageTransparentColor = [System.Drawing.Color]"White"
-                $SeriesWarningThreshold.BackSecondaryColor = [System.Drawing.Color]"PaleGoldenrod"        
-                $SeriesWarningThreshold.BackGradientStyle = [System.Windows.Forms.DataVisualization.Charting.GradientStyle]"TopBottom"
-            }
-            Else
-            {
-                $SeriesWarningThreshold.Color = [System.Drawing.Color]"PaleGoldenrod"
-                $SeriesWarningThreshold.BackGradientStyle = [System.Windows.Forms.DataVisualization.Charting.GradientStyle]"TopBottom"
-            }
-    		[Void] $alSeries.Add($SeriesWarningThreshold)        
-        }
-        
-        If ($dCriticalMin -ne $null)
-        {
-    		#// Add Critical Threshold values
-    		$SeriesCriticalThreshold = New-Object System.Windows.Forms.DataVisualization.Charting.Series
-    		For ($a=0; $a -lt $aDateTimes.length; $a++)
-    		{
-    			[Void] $SeriesCriticalThreshold.Points.Add($dCriticalMin[$a], $dCriticalMax[$a])
-    		}
-    		$SeriesCriticalThreshold.ChartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]"Range"
-    		$SeriesCriticalThreshold.Name = "Critical"
-            If ($sBackGradientStyle -eq "BottomTop")
-            {
-        		$SeriesCriticalThreshold.Color = [System.Drawing.Color]"Transparent"
-                $SeriesCriticalThreshold.BackImageTransparentColor = [System.Drawing.Color]"White"
-                $SeriesCriticalThreshold.BackSecondaryColor = [System.Drawing.Color]"Tomato"        
-                $SeriesCriticalThreshold.BackGradientStyle = [System.Windows.Forms.DataVisualization.Charting.GradientStyle]"TopBottom"
-            }
-            Else
-            {
-                $SeriesCriticalThreshold.Color = [System.Drawing.Color]"Tomato"
-                $SeriesCriticalThreshold.BackGradientStyle = [System.Windows.Forms.DataVisualization.Charting.GradientStyle]"TopBottom"
-            }        
-            [Void] $alSeries.Add($SeriesCriticalThreshold)
-        }
-	}
-	#// Sort the hast table and return an array of dictionary objects
-	[System.Object[]] $aDictionariesOfCounterValues = $htOfCounterValues.GetEnumerator() | Sort-Object Name
-
-	#// Add the counter instance values
-	For ($a=0; $a -lt $aDictionariesOfCounterValues.Count; $a++)
-	{
-		$SeriesOfCounterValues = New-Object System.Windows.Forms.DataVisualization.Charting.Series
-        $aValues = $aDictionariesOfCounterValues[$a].Value
-		For ($b=0;$b -lt $aValues.Count; $b++)
-		{
-			If (($aDateTimes[$b] -ne $null) -and ($aValues[$b] -ne $null))
-			{
-                #// Skips corrupted datetime fields
-                $dtDateTime = $aDateTimes[$b]
-                If ($dtDateTime -isnot [datetime])
-                {
-                    [datetime] $dtDateTime = $dtDateTime
-                }
-                [Void] $SeriesOfCounterValues.Points.AddXY(($dtDateTime).tostring($global:sDateTimePattern), $aValues[$b])
-			}
-		}
-		$SeriesOfCounterValues.ChartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]"Line"
-		$SeriesOfCounterValues.Name = $aDictionariesOfCounterValues[$a].Name
-        $SeriesOfCounterValues = AddADashStyle -Series $SeriesOfCounterValues -DashStyleNumber $a
-        #// Line thickness
-        $SeriesOfCounterValues.BorderWidth = $CHART_LINE_THICKNESS
-
-		[Void] $alSeries.Add($SeriesOfCounterValues)
-	}
-}
-
 Function SetXmlChartIsThresholdAddedAttribute
 {
     param($XmlChart)
@@ -3312,6 +3184,58 @@ Function SetXmlChartIsThresholdAddedAttribute
     {
         $XmlChart.SetAttribute("ISTHRESHOLDSADDED", "True")
     }
+}
+
+Function Add-PalChartCounterValue
+{
+    param($XmlChart, $XmlDataSourceCounterInstance, $CounterValues)
+    $counterName = [string]$XmlDataSourceCounterInstance.NAME
+    if (-not $global:htCounterInstanceStats.ContainsKey($counterName))
+    {
+        Write-Warning "`t[GeneratePalChart] Missing samples for $counterName"
+        return
+    }
+    $counterStats = $global:htCounterInstanceStats[$counterName]
+    if ($null -eq $counterStats -or $null -eq $counterStats.PSObject.Properties['Value'] -or $null -eq $counterStats.Value)
+    {
+        Write-Warning "`t[GeneratePalChart] Missing samples for $counterName"
+        return
+    }
+    $aValues = $counterStats.Value
+    if ($(Test-property -InputObject $XmlChart -Name 'MAXLIMIT') -eq $True)
+    {
+        $aValues = ReduceArrayValuesToMax -aValues $counterStats.Value -ChartMaxLimit $XmlChart.MAXLIMIT
+    }
+    $counterObject = ''
+    if ($null -ne $counterStats.PSObject.Properties['CounterObject'] -and $null -ne $counterStats.CounterObject)
+    {
+        $counterObject = [string]$counterStats.CounterObject
+    }
+    if (($counterObject.Contains('MSSQL$') -eq $True) -or ($counterObject.Contains('MSOLAP$') -eq $True))
+    {
+        $sSqlNamedInstance = ExtractSqlNamedInstanceFromCounterObjectPath -sCounterObjectPath $counterObject
+        if ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
+        {
+            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + '/' + $sSqlNamedInstance
+        }
+        else
+        {
+            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + '/' + $sSqlNamedInstance + '/' + $XmlDataSourceCounterInstance.COUNTERINSTANCE
+        }
+    }
+    elseif ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
+    {
+        $CounterLabel = [string]$XmlDataSourceCounterInstance.COUNTERCOMPUTER
+    }
+    else
+    {
+        $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + '/' + $XmlDataSourceCounterInstance.COUNTERINSTANCE
+    }
+    if ($CounterValues.ContainsKey($CounterLabel))
+    {
+        $CounterLabel = $CounterLabel + ' #' + ($CounterValues.Count + 1)
+    }
+    [void]$CounterValues.Add($CounterLabel, $aValues)
 }
 
 Function GeneratePalChart
@@ -3418,40 +3342,7 @@ Function GeneratePalChart
                     
                     If ($IsAllNull -eq $False)
                     {
-                        If ($(Test-property -InputObject $XmlChart -Name 'MAXLIMIT') -eq $True)
-                        {
-                            $aValues = ReduceArrayValuesToMax -aValues $($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].Value) -ChartMaxLimit $($XmlChart.MAXLIMIT)
-                        }
-                        Else
-                        {
-                            $aValues = $global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].Value
-                        }
-
-                        #// Check if this is a named instance of SQL Server
-                        If (($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterObject.Contains('MSSQL$') -eq $True) -or ($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterObject.Contains('MSOLAP$') -eq $True))
-                        {
-                            $sSqlNamedInstance = ExtractSqlNamedInstanceFromCounterObjectPath -sCounterObjectPath $global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterObject
-                            If ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
-                            {
-        						$CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $sSqlNamedInstance
-                            }
-                            Else
-                            {
-                                $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $sSqlNamedInstance + "/" + $XmlDataSourceCounterInstance.COUNTERINSTANCE
-                            }
-                        }
-                        Else
-                        {
-                            If ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
-                            {
-        						$CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER
-                            }
-                            Else
-                            {
-                                $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $XmlDataSourceCounterInstance.COUNTERINSTANCE
-                            }
-                        }
-                        [void] $htCounterValues.Add($CounterLabel,$aValues)
+                        Add-PalChartCounterValue -XmlChart $XmlChart -XmlDataSourceCounterInstance $XmlDataSourceCounterInstance -CounterValues $htCounterValues
                     }
                 }
             }
@@ -3510,40 +3401,7 @@ Function GeneratePalChart
             {
                 ForEach ($XmlDataSourceCounterInstance in $XmlCounterDataSource.SelectNodes("./COUNTERINSTANCE"))
                 {
-                    If ($(Test-property -InputObject $XmlChart -Name 'MAXLIMIT') -eq $True)
-                    {
-                        $aValues = ReduceArrayValuesToMax -aValues $($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].Value) -ChartMaxLimit $($XmlChart.MAXLIMIT)
-                    }
-                    Else
-                    {
-                        $aValues = $global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].Value
-                    }
-                    
-                    #// Check if this is a named instance of SQL Server
-                    If (($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterObject.Contains('MSSQL$') -eq $True) -or ($global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterObject.Contains('MSOLAP$') -eq $True))
-                    {
-                        $sSqlNamedInstance = ExtractSqlNamedInstanceFromCounterObjectPath -sCounterObjectPath $global:htCounterInstanceStats[$XmlDataSourceCounterInstance.NAME].CounterPath
-                        If ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
-                        {
-                            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $sSqlNamedInstance
-                        }
-                        Else
-                        {
-                            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $sSqlNamedInstance + "/" + $XmlDataSourceCounterInstance.COUNTERINSTANCE
-                        }
-                    }
-                    Else
-                    {
-                        If ($XmlDataSourceCounterInstance.COUNTERINSTANCE -eq '')
-                        {
-                            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER
-                        }
-                        Else
-                        {
-                            $CounterLabel = $XmlDataSourceCounterInstance.COUNTERCOMPUTER + "/" + $XmlDataSourceCounterInstance.COUNTERINSTANCE
-                        }
-                    }
-                    [void] $htCounterValues.Add($CounterLabel,$aValues)
+                    Add-PalChartCounterValue -XmlChart $XmlChart -XmlDataSourceCounterInstance $XmlDataSourceCounterInstance -CounterValues $htCounterValues
                 }
             }   
         }
@@ -3612,7 +3470,9 @@ Function ConvertToRelativeFilePaths
 {
     param($RootPath,$TargetPath)
     $Result = $TargetPath.Replace($RootPath,'')
-    $Result
+    $Result = $Result.TrimStart('\','/')
+    $Result = $Result.Replace('\','/')
+    return $Result
 }
 
 Function GenerateCharts
@@ -3629,17 +3489,28 @@ Function GenerateCharts
             $global:OverallActiveAnalysis = $XmlAnalysis.NAME
             ForEach ($XmlChart in $XmlAnalysis.SelectNodes("./CHART"))
             {
-                $alTempFilePaths = GeneratePalChart -XmlChart $XmlChart -XmlAnalysisInstance $XmlAnalysis
-                [System.Object[]] $alTempFilePaths = @($alTempFilePaths | Where-Object {$_ -ne $null})
-                For ($i=0;$i -lt $alTempFilePaths.Count;$i++)
+                try
                 {
-                    $alTempFilePaths[$i] = ConvertToRelativeFilePaths -RootPath $global:oPal.ArgsProcessed.OutputDir -TargetPath $alTempFilePaths[$i]
+                    $alTempFilePaths = GeneratePalChart -XmlChart $XmlChart -XmlAnalysisInstance $XmlAnalysis
+                    [System.Object[]] $alTempFilePaths = @($alTempFilePaths | Where-Object {$_ -ne $null})
+                    For ($i=0;$i -lt $alTempFilePaths.Count;$i++)
+                    {
+                        $alTempFilePaths[$i] = ConvertToRelativeFilePaths -RootPath $global:oPal.ArgsProcessed.OutputDir -TargetPath $alTempFilePaths[$i]
+                    }
+
+                    If (($null -ne $alTempFilePaths) -and ($alTempFilePaths.Count -gt 0))
+                    {
+                        $result = [string]::Join(',',$alTempFilePaths)
+                        $XmlChart.SetAttribute('FILEPATHS', $result)
+                    }
                 }
-                        
-                If ($alTempFilePaths -ne $null) #// Added by Andy from Codeplex.com
+                catch
                 {
-                    $result = [string]::Join(',',$alTempFilePaths)
-                    $XmlChart.SetAttribute("FILEPATHS", $result)
+                    $chartTitle = ''
+                    if ($(Test-property -InputObject $XmlChart -Name 'CHARTTITLE') -eq $True) { $chartTitle = [string]$XmlChart.CHARTTITLE }
+                    $message = $_.Exception.Message
+                    Write-Warning ("Chart failed for " + $XmlAnalysis.NAME + " / " + $chartTitle + ": " + $message)
+                    $XmlChart.SetAttribute('CHARTERROR', $message)
                 }
             }
         }
@@ -4615,7 +4486,22 @@ Function ProcessThresholds
             PrepareEnvironmentForThresholdProcessing -CurrentAnalysisInstance $XmlAnalysis
             ForEach ($XmlThreshold in $XmlAnalysis.SelectNodes("./THRESHOLD"))
             {
-                ProcessThreshold -XmlAnalysisInstance $XmlAnalysis -XmlThreshold $XmlThreshold
+                try
+                {
+                    ProcessThreshold -XmlAnalysisInstance $XmlAnalysis -XmlThreshold $XmlThreshold
+                }
+                catch
+                {
+                    $message = [string]$XmlThreshold.NAME + ': ' + $_.Exception.Message
+                    Write-Warning ("Threshold failed in " + $XmlAnalysis.NAME + ". " + $message)
+                    $existing = ''
+                    if ($(Test-property -InputObject $XmlAnalysis -Name 'THRESHOLDERRORS') -eq $True)
+                    {
+                        $existing = [string]$XmlAnalysis.THRESHOLDERRORS
+                    }
+                    if ($existing -ne '') { $existing = $existing + "`n" }
+                    $XmlAnalysis.SetAttribute('THRESHOLDERRORS', ($existing + $message))
+                }
             }
         }
     }
@@ -4784,6 +4670,18 @@ Function Add-WhiteFont
     {
         Return $Text
     }
+}
+
+Function Write-PalMissingChart
+{
+    param($HtmlPath, $XmlChart)
+    $message = 'No data to chart'
+    if ($(Test-property -InputObject $XmlChart -Name 'CHARTERROR') -eq $True -and [string]$XmlChart.CHARTERROR -ne '')
+    {
+        $message = 'This chart could not be drawn: ' + [string]$XmlChart.CHARTERROR
+    }
+    $message = $message.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
+    '<CENTER><table border=1 cellpadding=10><tr><td><FONT COLOR="#000000" FACE="Tahoma" SIZE="4">' + $message + '</font></td></tr></table></CENTER><BR>' >> $HtmlPath
 }
 
 Function GenerateHtml
@@ -5140,7 +5038,14 @@ Function GenerateHtml
                             $sDescription = $XmlAnalysisNode.DESCRIPTION.get_innertext()
                             '<BLOCKQUOTE><B>Description:</B> ' + $sDescription + '</BLOCKQUOTE>' >> $h
                             '<BR>' >> $h                        
-                        }                        
+                        }
+                        If ($(Test-property -InputObject $XmlAnalysisNode -Name 'THRESHOLDERRORS') -eq $True)
+                        {
+                            $sThresholdErrors = [string]$XmlAnalysisNode.THRESHOLDERRORS
+                            $sThresholdErrors = $sThresholdErrors.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
+                            $sThresholdErrors = $sThresholdErrors -replace "`r`n|`n|`r", '<BR>'
+                            '<BLOCKQUOTE><B>Some thresholds could not be evaluated:</B><BR>' + $sThresholdErrors + '</BLOCKQUOTE><BR>' >> $h
+                        }
                         
                         #///////////////////////
                         #// Chart
@@ -5198,17 +5103,19 @@ Function GenerateHtml
         							}
                                     ForEach ($sFilePath in $aFilePaths)
                                     {
-                                        '<CENTER><IMG SRC=' + '"' + "$sFilePath" + '"' + ' ALT="' + $sAltText + '"></CENTER><BR>' >> $h
+                                        $sAltHtml = ([string]$sAltText).Replace('&','&amp;').Replace('"','&quot;').Replace('<','&lt;').Replace('>','&gt;')
+                                        $sAltHtml = $sAltHtml -replace "`r`n|`n|`r", ' '
+                                        '<CENTER><IMG SRC=' + '"' + "$sFilePath" + '"' + ' ALT="' + $sAltHtml + '" STYLE="max-width:100%;height:auto;border:1px solid #d5dbe3;background:#fff"></CENTER><BR>' >> $h
                                     }
                                 }
                                 Else
                                 {
-                                    '<CENTER><table border=1 cellpadding=10><tr><td><FONT COLOR="#000000" FACE="Tahoma" SIZE="4">No data to chart</font></td></tr></table></CENTER><BR>' >> $h
+                                    Write-PalMissingChart -HtmlPath $h -XmlChart $XmlChart
                                 }
                             }
                             Else
                             {
-                                '<CENTER><table border=1 cellpadding=10><tr><td><FONT COLOR="#000000" FACE="Tahoma" SIZE="4">No data to chart</font></td></tr></table></CENTER><BR>' >> $h
+                                Write-PalMissingChart -HtmlPath $h -XmlChart $XmlChart
                             }                            
                         }
                         #///////////////////////
@@ -5465,17 +5372,9 @@ Function SaveXmlReport
 #// Main
 #/////////////
 
-#// The following block of code was contributed by Carl Knox.
-if([Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms.DataVisualization") -eq $null)
+#// Charts are written as SVG by PalCharts.ps1, so the old WinForms chart assembly is not required.
+if ($MyInvocation.InvocationName -ne '.')
 {
-    #// ... then the Microsoft Chart Controls are not installed.
-    [void][reflection.assembly]::Load("System.Windows.Forms, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089")
-    [void][System.Windows.Forms.MessageBox]::Show("Microsoft Chart Controls for Microsoft .NET 3.5 Framework is required", "Microsoft Chart Controls Required")
-    #Open the URL
-    WriteErrorToHtmlAndShow -sError 'Microsoft Chart Controls for Microsoft .NET 3.5 Framework is required. Download and install for free at http://www.microsoft.com/downloads/en/details.aspx?familyid=130F7986-BF49-4FE5-9CA8-910AE6EA442C&displaylang=en'
-    [System.Diagnostics.Process]::Start("http://www.microsoft.com/downloads/en/details.aspx?familyid=130F7986-BF49-4FE5-9CA8-910AE6EA442C&displaylang=en");
-    Break;
-}
 
 $global:iOverallCompletion = 0
 Write-Progress -activity 'Overall progress...' -status 'Progress: 0%... SetThreadPriority' -percentcomplete 0 -id 1
@@ -5528,3 +5427,4 @@ UpdateOverallProgress -Status 'Saving the XML report'
 Write-Progress -activity 'Overall progress...' -Completed -id 1 -Status 'Progress: 100%'
     OpenHtmlReport -HtmlOutputFileName $($global:oPal.ArgsProcessed.HtmlOutputFileName)
     StopDebugLogFile
+}
