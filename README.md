@@ -5,14 +5,16 @@
 [![issues badge]][issues]
 
 [licence badge]:https://img.shields.io/badge/license-MIT-blue.svg
-[stars badge]:https://img.shields.io/github/stars/clinthuffman/PAL.svg
-[forks badge]:https://img.shields.io/github/forks/clinthuffman/PAL.svg
-[issues badge]:https://img.shields.io/github/issues/clinthuffman/PAL.svg
+[stars badge]:https://img.shields.io/github/stars/jeffstokes72/PAL.svg
+[forks badge]:https://img.shields.io/github/forks/jeffstokes72/PAL.svg
+[issues badge]:https://img.shields.io/github/issues/jeffstokes72/PAL.svg
 
-[licence]:https://github.com/clinthuffman/PAL/blob/master/LICENSE.md
-[stars]:https://github.com/clinthuffman/PAL/stargazers
-[forks]:https://github.com/clinthuffman/PAL/network
-[issues]:https://github.com/clinthuffman/PAL/issues
+[licence]:https://github.com/jeffstokes72/PAL/blob/master/LICENSE.md
+[stars]:https://github.com/jeffstokes72/PAL/stargazers
+[forks]:https://github.com/jeffstokes72/PAL/network
+[issues]:https://github.com/jeffstokes72/PAL/issues
+
+This repository is a maintained fork of [clinthuffman/PAL](https://github.com/clinthuffman/PAL). It keeps PAL working on current Windows releases; the original project is no longer updated.
 
 ## Created by Clint Huffman
 
@@ -35,21 +37,33 @@ The PAL (Performance Analysis of Logs) tool reads a performance monitor counter 
  - Creates an HTML report, with SVG charts, for ease of copy/pasting into other applications.
  - Analyzes performance counter logs for thresholds using thresholds that change their criteria based on the computer's role or hardware specs.
  
- ## Requirements
- Run PAL on Windows with Windows PowerShell 5.1 and the Microsoft .NET Framework 4.7.2 feature enabled. The analysis script is `PAL.ps1`. Charts in the HTML report are self-contained SVG drawings produced by that script.
+## Requirements
+Windows 10, Windows 11, or Windows Server 2016 or later, with Windows PowerShell 5.1 (inbox) or PowerShell 7 and the .NET Framework 4.7.2 or later (inbox on Windows 10 1803+ and Windows 11). The analysis script is `PAL.ps1`. Charts in the HTML report are self-contained SVG drawings produced by that script, so no chart controls need to be installed. Log conversion uses the inbox `relog.exe`.
 
 ## How to download
-If you wish to install the PAL tool, then download `PAL_Setup`. It contains the Microsoft installer files. Right-click and go to Properties of the zip file, select Unblock, and then click OK. Extract the zip file to a new, empty folder, and then run Setup.
 
-If you just want to run it without installation, then download `PAL_FlatFile`. Right-click and go to Properties of the zip file, select Unblock, and then click OK. Extract the zip file to a new, empty folder, and then run PALWizard.exe to use the tool.
+**Option 1: release zip.** Download the latest `PAL_FlatFiles_<version>.zip` from this repository's [releases page](https://github.com/jeffstokes72/PAL/releases). Right-click the zip, choose Properties, tick **Unblock**, click OK, extract it to a new empty folder, and run `PALWizard.exe`. No installer is required.
 
-Both files can be downloaded from the [releases section](https://github.com/clinthuffman/PAL/releases)
+**Option 2: run from a checkout.** Clone this repository or use **Code → Download ZIP**, unblock and extract it, then run `PAL2\PALWizard\bin\Debug\PALWizard.exe`. That folder contains everything PAL needs: the wizard, `PAL.ps1`, `PalCharts.ps1`, and the threshold files.
+
+Older `PAL_FlatFiles_*.zip` files in the repository root are previous releases kept for reference.
+
+The MSI installer (`PAL2/PALSetup`) is not produced by the automated build because it requires the Visual Studio Installer Projects extension. Build it in Visual Studio if you need an installer.
+
+## How releases are built
+Every push runs the [Build PAL](.github/workflows/build.yml) workflow on a Windows runner: it compiles `PALWizard.exe`, runs `PAL2/PALWizard/tests/Test-PalCharts.ps1` under both Windows PowerShell 5.1 and PowerShell 7, and uploads the flat-file zip as a build artifact. Pushing a tag such as `v2.8.3` publishes that zip as a GitHub Release.
 
 ## How to use
-Run PALWizard.exe to use the PAL Wizard tool. Otherwise, use PAL.ps1 directly.
+Run `PALWizard.exe` to use the PAL Wizard. It finds the counter log, asks a few questions about the computer, and writes a batch file that runs `PAL.ps1`. You can also run the script directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -NoProfile -File .\PAL.ps1 -Log "C:\PerfLogs\server.blg" -ThresholdFile QuickSystemOverview.xml
+```
+
+Reports are written to `Documents\PAL Reports` by default.
 
 ## Feedback
-Your feedback is welcome via the [issues section](https://github.com/clinthuffman/PAL/issues)
+Your feedback is welcome via the [issues section](https://github.com/jeffstokes72/PAL/issues)
 
 ## Contributing
 Your contributions are very welcome by submitting a Pull Request. Please keep Clint Huffman's attribution in the report header, the script header, and this README when you do.
