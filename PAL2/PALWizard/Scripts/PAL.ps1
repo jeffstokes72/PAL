@@ -42,7 +42,13 @@ $CHART_MAX_INSTANCES = 12 #// the maximum number of counter instances in one cha
 $CHART_MAX_NUMBER_OF_AXIS_X_INTERVALS = 8
 
 $PalScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $PalScriptDirectory 'PalCharts.ps1')
+$PalChartsScriptPath = Join-Path $PalScriptDirectory 'PalCharts.ps1'
+if (-not (Test-Path -LiteralPath $PalChartsScriptPath))
+{
+    Write-Error "PAL requires PalCharts.ps1 in the same folder as PAL.ps1 but it was not found at '$PalChartsScriptPath'. Copy all of the PAL files together and try again."
+    exit 1
+}
+. $PalChartsScriptPath
 
 #//////////////////////////////////////////////////////////////////
 #// Global unchangable variables - DO NOT CHANGE THESE VARIABLES
@@ -1244,8 +1250,10 @@ Function Invoke-RelogProcess
         $proc = New-Object System.Diagnostics.Process
         $proc.StartInfo = $psi
         [void]$proc.Start()
+        #// Drain stderr on a background task so relog.exe cannot block on a full pipe while stdout is read.
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
         $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
+        $stderr = $stderrTask.Result
         $proc.WaitForExit()
         $linesOut = ConvertTo-RelogOutputLines -Text ($stdout + "`n" + $stderr)
         $result.ExitCode = $proc.ExitCode
